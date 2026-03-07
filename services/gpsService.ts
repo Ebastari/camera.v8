@@ -20,8 +20,8 @@ export const getGpsLocation = (): Promise<GpsLocation> => {
       },
       {
         enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 0,
+        timeout: 12000,
+        maximumAge: 3000,
       }
     );
   });
@@ -52,8 +52,8 @@ export const watchGpsLocation = (
     onError,
     {
       enableHighAccuracy: true,
-      timeout: 5000,
-      maximumAge: 0,
+      timeout: 8000,
+      maximumAge: 3000,
     }
   );
 };

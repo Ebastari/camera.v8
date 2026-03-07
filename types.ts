@@ -22,8 +22,13 @@ export interface PlantEntry {
   vendor: string;
   tim: string;
   kesehatan: 'Sehat' | 'Merana' | 'Mati';
+  gpsQualityAtCapture?: 'Tinggi' | 'Sedang' | 'Rendah' | 'Tidak Tersedia';
+  gpsAccuracyAtCapture?: number;
   foto: string; // base64
   uploaded?: boolean;
+  retryCount?: number;
+  lastSyncAttemptAt?: string;
+  lastSyncError?: string;
   noPohon: number;
   description?: string;
   linkDrive?: string;

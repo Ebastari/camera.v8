@@ -14,3 +14,13 @@ root.render(
     <App />
   </React.StrictMode>
 );
+
+const isSecureContextForSW = window.location.protocol === 'https:' || window.location.hostname === 'localhost';
+
+if ('serviceWorker' in navigator && isSecureContextForSW) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch((error) => {
+      console.error('Service worker registration failed:', error);
+    });
+  });
+}

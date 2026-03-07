@@ -10,6 +10,34 @@ interface DataTabProps {
 
 // Menambah jumlah item per halaman karena optimasi lazy load gambar sudah diterapkan
 const ITEMS_PER_PAGE = 10;
+const RETRY_BASE_DELAY_MS = 15000;
+const RETRY_MAX_DELAY_MS = 5 * 60 * 1000;
+
+const getRetryDelayMs = (retryCount: number): number => {
+  const exponent = Math.max(0, retryCount - 1);
+  return Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** exponent);
+};
+
+const getNextRetryText = (entry: PlantEntry): string => {
+  const retryCount = entry.retryCount || 0;
+  if (!entry.lastSyncAttemptAt || retryCount <= 0) {
+    return 'Siap dikirim';
+  }
+
+  const lastAttempt = new Date(entry.lastSyncAttemptAt).getTime();
+  if (!Number.isFinite(lastAttempt)) {
+    return 'Siap dikirim';
+  }
+
+  const waitUntil = lastAttempt + getRetryDelayMs(retryCount);
+  const diff = waitUntil - Date.now();
+  if (diff <= 0) {
+    return 'Siap retry';
+  }
+
+  const seconds = Math.ceil(diff / 1000);
+  return `Retry ${seconds} dtk lagi`;
+};
 
 export const DataTab: React.FC<DataTabProps> = ({ entries, isOnline, onSyncPending }) => {
   const [currentPage, setCurrentPage] = useState(1);
@@ -21,12 +49,28 @@ export const DataTab: React.FC<DataTabProps> = ({ entries, isOnline, onSyncPendi
     return [...entries].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   }, [entries]);
 
+  const pendingEntries = useMemo(() => {
+    return [...entries]
+      .filter((entry) => !entry.uploaded)
+      .sort((a, b) => {
+        const retryA = a.retryCount || 0;
+        const retryB = b.retryCount || 0;
+        if (retryA !== retryB) {
+          return retryB - retryA;
+        }
+        return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+      });
+  }, [entries]);
+
   const latestEntry = sortedEntries[0];
   
   const handleSync = async () => {
     setIsSyncing(true);
-    await onSyncPending();
-    setIsSyncing(false);
+    try {
+      await onSyncPending();
+    } finally {
+      setIsSyncing(false);
+    }
   };
 
   const paginatedEntries = useMemo(() => {
@@ -78,6 +122,34 @@ export const DataTab: React.FC<DataTabProps> = ({ entries, isOnline, onSyncPendi
           </div>
 
           <div className="space-y-4 pt-4">
+            {pendingEntries.length > 0 && (
+              <div className="bg-amber-50 border border-amber-100 rounded-[2rem] p-4 mx-1 space-y-3">
+                <div className="flex justify-between items-center">
+                  <h4 className="text-[10px] font-black text-amber-700 uppercase tracking-[0.2em]">Retry Queue</h4>
+                  <span className="text-[9px] font-black text-amber-700">{pendingEntries.length} pending</span>
+                </div>
+
+                <div className="space-y-2 max-h-[170px] overflow-y-auto no-scrollbar pr-1">
+                  {pendingEntries.slice(0, 6).map((entry) => (
+                    <div key={`retry-${entry.id}`} className="bg-white rounded-xl border border-amber-100 px-3 py-2">
+                      <div className="flex justify-between items-start gap-3">
+                        <div>
+                          <p className="text-[10px] font-black text-slate-700 uppercase">Pohon #{entry.noPohon}</p>
+                          <p className="text-[9px] text-slate-500 font-bold">Retry: {entry.retryCount || 0}x</p>
+                        </div>
+                        <span className="text-[8px] font-black text-amber-700 uppercase tracking-widest">
+                          {getNextRetryText(entry)}
+                        </span>
+                      </div>
+                      {entry.lastSyncError && (
+                        <p className="text-[9px] text-red-600 font-semibold mt-1 truncate">{entry.lastSyncError}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <h4 className="text-[11px] font-black text-slate-800 uppercase tracking-[0.2em] px-3">Riwayat Pengamatan</h4>
             <div className="space-y-3 px-1">
               {paginatedEntries.map(entry => (
@@ -94,6 +166,22 @@ export const DataTab: React.FC<DataTabProps> = ({ entries, isOnline, onSyncPendi
                   <div className="flex-1">
                     <p className="font-black text-sm text-slate-800">Pohon #{entry.noPohon}</p>
                     <span className="text-[9px] text-slate-400 font-bold uppercase">{entry.tanaman} • {entry.tinggi} cm</span>
+                    <div className="mt-1">
+                      <span className={`text-[8px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full ${
+                        entry.gpsQualityAtCapture === 'Tinggi'
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                          : entry.gpsQualityAtCapture === 'Sedang'
+                            ? 'bg-amber-50 text-amber-700 border border-amber-100'
+                            : entry.gpsQualityAtCapture === 'Rendah'
+                              ? 'bg-red-50 text-red-700 border border-red-100'
+                              : 'bg-slate-100 text-slate-600 border border-slate-200'
+                      }`}>
+                        GPS: {entry.gpsQualityAtCapture || 'Tidak Tersedia'}
+                      </span>
+                      <span className="text-[8px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full ml-1 bg-slate-100 text-slate-600 border border-slate-200">
+                        {Number.isFinite(entry.gpsAccuracyAtCapture) ? `±${Number(entry.gpsAccuracyAtCapture).toFixed(1)}m` : 'Akurasi n/a'}
+                      </span>
+                    </div>
                   </div>
                   <div className="text-[16px]">{entry.uploaded ? '✅' : '💾'}</div>
                 </div>

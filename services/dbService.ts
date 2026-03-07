@@ -2,8 +2,9 @@
 import { PlantEntry } from '../types';
 
 const DB_NAME = 'MonitoringTanamanDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'entries';
+const PHOTO_ANALYSIS_STORE = 'photo_analysis_cache';
 
 export const initDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
@@ -15,6 +16,12 @@ export const initDB = (): Promise<IDBDatabase> => {
         const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' });
         store.createIndex('timestamp', 'timestamp', { unique: false });
         store.createIndex('uploaded', 'uploaded', { unique: false });
+      }
+
+      // Siapkan store cache analisis citra untuk modul ekologi.
+      if (!db.objectStoreNames.contains(PHOTO_ANALYSIS_STORE)) {
+        const cacheStore = db.createObjectStore(PHOTO_ANALYSIS_STORE, { keyPath: 'entryId' });
+        cacheStore.createIndex('updatedAt', 'updatedAt', { unique: false });
       }
     };
 
@@ -59,6 +66,31 @@ export const updateEntryStatus = async (id: string, uploaded: boolean): Promise<
       if (data) {
         data.uploaded = uploaded;
         store.put(data);
+      }
+      resolve();
+    };
+    getRequest.onerror = () => reject(getRequest.error);
+  });
+};
+
+export const updateEntrySyncMeta = async (
+  id: string,
+  patch: { retryCount?: number; lastSyncAttemptAt?: string; lastSyncError?: string; uploaded?: boolean },
+): Promise<void> => {
+  const db = await initDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    const getRequest = store.get(id);
+
+    getRequest.onsuccess = () => {
+      const data = getRequest.result;
+      if (data) {
+        const next = {
+          ...data,
+          ...patch,
+        };
+        store.put(next);
       }
       resolve();
     };

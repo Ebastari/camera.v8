@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { CameraView } from './components/CameraView';
 import { BottomSheet } from './components/BottomSheet';
 import { useLocalStorage } from './hooks/useLocalStorage';
@@ -8,13 +8,62 @@ import { uploadToAppsScript } from './services/uploadService';
 import { watchGpsLocation } from './services/gpsService';
 import { PlantEntry, GpsLocation, ToastState, FormState } from './types';
 import { Toast } from './components/Toast';
-import { getAllEntries, saveEntry, updateEntryStatus, clearAllEntries } from './services/dbService';
+import { getAllEntries, saveEntry, updateEntrySyncMeta, clearAllEntries } from './services/dbService';
+import { checkInternetConnection } from './services/networkService';
+
+const RETRY_BASE_DELAY_MS = 15000;
+const RETRY_MAX_DELAY_MS = 5 * 60 * 1000;
+
+const getRetryDelayMs = (retryCount: number): number => {
+  const exponent = Math.max(0, retryCount - 1);
+  return Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** exponent);
+};
+
+const isIOSFamilyDevice = (): boolean => {
+  const ua = navigator.userAgent || '';
+  const isClassicIOS = /iPhone|iPad|iPod/i.test(ua);
+  const isIPadDesktopMode = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+  return isClassicIOS || isIPadDesktopMode;
+};
+
+const dataUrlToFile = async (dataUrl: string, fileName: string): Promise<File> => {
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  return new File([blob], fileName, { type: blob.type || 'image/jpeg' });
+};
+
+const GPS_ACCURACY_THRESHOLD_M = 20;
+const DESKTOP_GPS_ACCURACY_THRESHOLD_M = 60;
+
+const isDesktopLikeDevice = (): boolean => {
+  const ua = navigator.userAgent || '';
+  const isMobile = /iPhone|iPad|iPod|Android|Mobile/i.test(ua);
+  return !isMobile;
+};
+
+const classifyGpsQualityAtCapture = (
+  gps: GpsLocation | null,
+): 'Tinggi' | 'Sedang' | 'Rendah' | 'Tidak Tersedia' => {
+  if (!gps || !Number.isFinite(gps.accuracy)) {
+    return 'Tidak Tersedia';
+  }
+  if (gps.accuracy < 5) {
+    return 'Tinggi';
+  }
+  if (gps.accuracy <= 10) {
+    return 'Sedang';
+  }
+  return 'Rendah';
+};
 
 const App: React.FC = () => {
   const [entries, setEntries] = useState<PlantEntry[]>([]);
   const [isBottomSheetOpen, setBottomSheetOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
+  const syncInProgressRef = useRef(false);
 
   const [formState, setFormState] = useLocalStorage<FormState>('formState', {
     tinggi: 10,
@@ -45,23 +94,56 @@ const App: React.FC = () => {
     loadData();
   }, []);
 
+  const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info', duration: number = 3000) => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), duration);
+  }, []);
+
+  const updateOnlineState = useCallback((nextValue: boolean) => {
+    setIsOnline((prev) => {
+      if (prev !== nextValue) {
+        showToast(nextValue ? 'Koneksi Terhubung' : 'Mode Offline Aktif', nextValue ? 'success' : 'info');
+      }
+      return nextValue;
+    });
+  }, [showToast]);
+
+  const verifyConnectivity = useCallback(async () => {
+    const reachable = await checkInternetConnection(appsScriptUrl);
+    updateOnlineState(reachable);
+  }, [appsScriptUrl, updateOnlineState]);
+
   useEffect(() => {
-    const handleOnline = () => {
-      setIsOnline(true);
-      showToast('Koneksi Terhubung', 'success');
-    };
-    const handleOffline = () => {
-      setIsOnline(false);
-      showToast('Mode Offline Aktif', 'info');
+    const handleOnlineEvent = () => {
+      void verifyConnectivity();
     };
 
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
+    const handleOfflineEvent = () => {
+      void verifyConnectivity();
     };
-  }, []);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void verifyConnectivity();
+      }
+    };
+
+    void verifyConnectivity();
+    const interval = window.setInterval(() => {
+      void verifyConnectivity();
+    }, 15000);
+
+    window.addEventListener('online', handleOnlineEvent);
+    window.addEventListener('offline', handleOfflineEvent);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('online', handleOnlineEvent);
+      window.removeEventListener('offline', handleOfflineEvent);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [verifyConnectivity]);
 
   useEffect(() => {
     let watchId: number;
@@ -78,52 +160,171 @@ const App: React.FC = () => {
     };
   }, []);
 
-  const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info', duration: number = 3000) => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), duration);
-  }, []);
+  const syncPendingEntries = useCallback(async (options?: { background?: boolean }) => {
+    const isBackground = options?.background ?? false;
 
-  const syncPendingEntries = useCallback(async () => {
-    const pending = entries.filter(e => !e.uploaded);
+    if (syncInProgressRef.current) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    const pending = entries.filter((entry) => {
+      if (entry.uploaded) {
+        return false;
+      }
+
+      if (!entry.lastSyncAttemptAt) {
+        return true;
+      }
+
+      const retryCount = entry.retryCount || 0;
+      const lastAttemptMs = new Date(entry.lastSyncAttemptAt).getTime();
+      if (!Number.isFinite(lastAttemptMs)) {
+        return true;
+      }
+
+      const waitMs = getRetryDelayMs(retryCount);
+      return nowMs - lastAttemptMs >= waitMs;
+    });
+
     if (pending.length === 0) {
-      showToast('Semua data sudah tersinkronisasi', 'success');
+      if (!isBackground) {
+        showToast('Belum ada data siap retry. Tunggu jeda retry selesai.', 'info');
+      }
       return;
     }
 
-    if (!navigator.onLine) {
-      showToast('Tidak ada internet untuk sinkronisasi', 'error');
+    if (!isOnline) {
+      if (!isBackground) {
+        showToast('Tidak ada internet untuk sinkronisasi', 'error');
+      }
       return;
     }
 
-    showToast(`Sinkronisasi ${pending.length} data...`, 'info');
+    setIsSyncing(true);
+    syncInProgressRef.current = true;
+
+    if (!isBackground) {
+      showToast(`Sinkronisasi ${pending.length} data...`, 'info');
+    }
     
     let successCount = 0;
-    for (const entry of pending) {
-      try {
-        await uploadToAppsScript(appsScriptUrl, entry);
-        await updateEntryStatus(entry.id, true);
-        successCount++;
-      } catch (error) {
-        console.error(`Gagal upload entri ${entry.id}:`, error);
-      }
-    }
+    let unconfirmedCount = 0;
+    let failedCount = 0;
+    let lastErrorMessage = '';
+    try {
+      for (const entry of pending) {
+        const attemptAt = new Date().toISOString();
+        await updateEntrySyncMeta(entry.id, {
+          lastSyncAttemptAt: attemptAt,
+        });
 
-    if (successCount > 0) {
-      const updatedData = await getAllEntries();
-      setEntries(updatedData);
-      showToast(`${successCount} data berhasil diunggah`, 'success');
-    } else {
-      showToast('Gagal sinkronisasi data', 'error');
+        try {
+          const result = await uploadToAppsScript(appsScriptUrl, entry);
+          if (!result.ok) {
+            throw new Error(result.message);
+          }
+
+          await updateEntrySyncMeta(entry.id, {
+            uploaded: true,
+            retryCount: 0,
+            lastSyncAttemptAt: attemptAt,
+            lastSyncError: '',
+          });
+          if (!result.confirmed) {
+            unconfirmedCount += 1;
+          }
+          successCount++;
+        } catch (error) {
+          const nextRetry = (entry.retryCount || 0) + 1;
+          await updateEntrySyncMeta(entry.id, {
+            retryCount: nextRetry,
+            lastSyncAttemptAt: attemptAt,
+            lastSyncError: error instanceof Error ? error.message : 'Sinkronisasi gagal.',
+          });
+          failedCount += 1;
+          lastErrorMessage = error instanceof Error ? error.message : 'Sinkronisasi gagal.';
+          console.error(`Gagal upload entri ${entry.id}:`, error);
+        }
+      }
+
+      if (successCount > 0) {
+        const updatedData = await getAllEntries();
+        setEntries(updatedData);
+        setLastSyncAt(new Date().toISOString());
+        if (unconfirmedCount > 0) {
+          showToast(`${successCount} data terkirim (${unconfirmedCount} belum terverifikasi).`, 'info');
+        } else {
+          showToast(
+            isBackground ? `Auto-sync berhasil untuk ${successCount} data.` : `${successCount} data berhasil diunggah`,
+            'success',
+          );
+        }
+      } else if (!isBackground) {
+        showToast(lastErrorMessage || 'Gagal sinkronisasi data', 'error');
+      }
+
+      if (failedCount > 0 && successCount > 0 && !isBackground) {
+        showToast(`${failedCount} data gagal sinkron. Cek URL Apps Script dan koneksi.`, 'error');
+      }
+    } finally {
+      setIsSyncing(false);
+      syncInProgressRef.current = false;
     }
-  }, [entries, appsScriptUrl, showToast]);
+  }, [entries, appsScriptUrl, showToast, isOnline]);
+
+  useEffect(() => {
+    if (!isOnline) {
+      return;
+    }
+    void syncPendingEntries({ background: true });
+  }, [isOnline, syncPendingEntries]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && isOnline) {
+        void syncPendingEntries({ background: true });
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [isOnline, syncPendingEntries]);
 
   const handleCapture = useCallback(async (dataUrl: string) => {
     const timestamp = new Date();
     const pad = (n: number, len: number = 2) => n.toString().padStart(len, '0');
     const id = `${timestamp.getFullYear()}${pad(timestamp.getMonth() + 1)}${pad(timestamp.getDate())}-${pad(timestamp.getHours())}${pad(timestamp.getMinutes())}${pad(timestamp.getSeconds())}${pad(timestamp.getMilliseconds(), 3)}`;
 
+    if (!gps) {
+      const continueWithoutGps = window.confirm(
+        'GPS belum terkunci. Data akan tersimpan dengan koordinat 0,0. Lanjutkan?',
+      );
+      if (!continueWithoutGps) {
+        showToast('Capture dibatalkan. Tunggu GPS terkunci.', 'info');
+        return;
+      }
+    }
+
+    const activeGpsThreshold = isDesktopLikeDevice()
+      ? DESKTOP_GPS_ACCURACY_THRESHOLD_M
+      : GPS_ACCURACY_THRESHOLD_M;
+
+    if (gps && gps.accuracy > activeGpsThreshold) {
+      const continueWithLowAccuracy = window.confirm(
+        `Akurasi GPS saat ini ±${gps.accuracy.toFixed(1)}m (> ${activeGpsThreshold}m). Lanjutkan capture?`,
+      );
+      if (!continueWithLowAccuracy) {
+        showToast('Capture dibatalkan. Tunggu akurasi GPS membaik.', 'info');
+        return;
+      }
+    }
+
     const lat = gps ? gps.lat : 0;
     const lon = gps ? gps.lon : 0;
+    const gpsQualityAtCapture = classifyGpsQualityAtCapture(gps);
 
     const newEntryMeta: Omit<PlantEntry, 'foto'> = {
       id,
@@ -142,8 +343,11 @@ const App: React.FC = () => {
       vendor: formState.vendor,
       tim: formState.tim,
       kesehatan: formState.kesehatan,
+      gpsQualityAtCapture,
+      gpsAccuracyAtCapture: gps?.accuracy,
       noPohon: entries.length + 1,
       uploaded: false,
+      retryCount: 0,
       statusDuplikat: "UNIK"
     };
 
@@ -158,25 +362,84 @@ const App: React.FC = () => {
       await saveEntry(finalEntry);
       setEntries(prev => [...prev, finalEntry]);
 
-      // DOWNLOAD OTOMATIS
-      setTimeout(() => {
+      const fileName = `TREE_${formState.jenis.toUpperCase()}_${id}.jpg`;
+
+      // iPhone/iPad: buka sheet Bagikan/Simpan agar kompatibel dengan policy Safari iOS.
+      if (isIOSFamilyDevice() && typeof navigator.share === 'function') {
+        try {
+          const imageFile = await dataUrlToFile(photoWithExif, fileName);
+          const canShare =
+            typeof navigator.canShare === 'function' && navigator.canShare({ files: [imageFile] });
+
+          if (canShare) {
+            await navigator.share({
+              title: fileName,
+              text: 'Foto hasil monitoring tanaman',
+              files: [imageFile],
+            });
+            showToast('Sheet Bagikan/Simpan dibuka.', 'success', 1500);
+          } else {
+            const preview = window.open(photoWithExif, '_blank');
+            if (!preview) {
+              showToast('Popup diblokir. Silakan izinkan popup untuk menyimpan foto.', 'error');
+            } else {
+              showToast('Tap dan tahan gambar lalu pilih Simpan.', 'info', 3000);
+            }
+          }
+        } catch (shareError) {
+          // AbortError berarti user menutup sheet, bukan kegagalan sistem.
+          if (shareError instanceof DOMException && shareError.name === 'AbortError') {
+            showToast('Bagikan dibatalkan pengguna.', 'info', 1500);
+          } else {
+            const preview = window.open(photoWithExif, '_blank');
+            if (!preview) {
+              showToast('Gagal membuka bagikan/simpan foto.', 'error');
+            } else {
+              showToast('Tap dan tahan gambar lalu pilih Simpan.', 'info', 3000);
+            }
+          }
+        }
+      } else {
+        // Android/Desktop: tetap auto-download.
         const downloadLink = document.createElement('a');
         downloadLink.href = photoWithExif;
-        downloadLink.download = `TREE_${formState.jenis.toUpperCase()}_${id}.jpg`;
+        downloadLink.download = fileName;
         document.body.appendChild(downloadLink);
         downloadLink.click();
         document.body.removeChild(downloadLink);
-      }, 300);
+      }
 
-      if (appsScriptUrl && navigator.onLine) {
+      if (appsScriptUrl && isOnline) {
         showToast('Mengirim ke Cloud...', 'info');
         try {
-          await uploadToAppsScript(appsScriptUrl, finalEntry);
-          await updateEntryStatus(finalEntry.id, true);
+          const attemptAt = new Date().toISOString();
+          await updateEntrySyncMeta(finalEntry.id, {
+            lastSyncAttemptAt: attemptAt,
+          });
+
+          const result = await uploadToAppsScript(appsScriptUrl, finalEntry);
+          if (!result.ok) {
+            throw new Error(result.message);
+          }
+
+          await updateEntrySyncMeta(finalEntry.id, {
+            uploaded: true,
+            retryCount: 0,
+            lastSyncAttemptAt: attemptAt,
+            lastSyncError: '',
+          });
           setEntries(prev => prev.map(e => e.id === finalEntry.id ? { ...e, uploaded: true } : e));
-          showToast('Berhasil Tersinkron!', 'success');
+          setLastSyncAt(new Date().toISOString());
+          showToast(result.confirmed ? 'Berhasil Tersinkron!' : 'Data terkirim, menunggu verifikasi cloud.', result.confirmed ? 'success' : 'info');
         } catch (error) {
-          showToast('Gagal Sinkron, Tersimpan Lokal.', 'info');
+          const message = error instanceof Error ? error.message : 'Gagal Sinkron, Tersimpan Lokal.';
+          await updateEntrySyncMeta(finalEntry.id, {
+            retryCount: (finalEntry.retryCount || 0) + 1,
+            lastSyncAttemptAt: new Date().toISOString(),
+            lastSyncError: message,
+          });
+          console.error('Sinkronisasi capture gagal:', error);
+          showToast(message || 'Gagal Sinkron, Tersimpan Lokal.', 'error');
         }
       } else {
         showToast('Tersimpan dengan Geotag.', 'success');
@@ -185,7 +448,7 @@ const App: React.FC = () => {
       console.error(error);
       showToast('Gagal memproses gambar.', 'error');
     }
-  }, [formState, gps, entries.length, appsScriptUrl, showToast]);
+  }, [formState, gps, entries.length, appsScriptUrl, showToast, isOnline]);
 
   const handleClearData = async () => {
     if (window.confirm('Hapus semua data dari database lokal?')) {
@@ -196,12 +459,15 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="w-screen h-screen overflow-hidden bg-black text-slate-800">
+    <div className="w-screen h-[100dvh] min-h-[100dvh] overflow-hidden bg-black text-slate-800">
       <CameraView 
         onCapture={handleCapture}
         formState={formState}
         onFormStateChange={setFormState}
         entriesCount={entries.length}
+        pendingCount={entries.filter((entry) => !entry.uploaded).length}
+        isSyncing={isSyncing}
+        lastSyncAt={lastSyncAt}
         gps={gps}
         onGpsUpdate={setGps}
         onShowSheet={() => setBottomSheetOpen(true)}

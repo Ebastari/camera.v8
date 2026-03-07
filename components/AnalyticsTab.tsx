@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { PlantEntry } from '../types';
 import { AnalyticsPanel } from './AnalyticsPanel';
-import { fetchCloudData } from '../services/fetchService';
+import { fetchCloudDataSmart } from '../services/fetchService';
 
 interface AnalyticsTabProps {
   entries: PlantEntry[];
@@ -13,14 +13,18 @@ interface AnalyticsTabProps {
 export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({ entries, appsScriptUrl, isOnline }) => {
   const [cloudData, setCloudData] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [cloudSource, setCloudSource] = useState<'network' | 'cache'>('network');
+  const [cachedAt, setCachedAt] = useState<string | null>(null);
 
   const loadCloudData = async () => {
-    if (!isOnline || !appsScriptUrl || appsScriptUrl.includes('/s/.../exec')) return;
-    
+    if (!appsScriptUrl || appsScriptUrl.includes('/s/.../exec')) return;
+
     setLoading(true);
     try {
-      const result = await fetchCloudData(appsScriptUrl);
-      setCloudData(Array.isArray(result) ? result : []);
+      const result = await fetchCloudDataSmart(appsScriptUrl);
+      setCloudData(Array.isArray(result.data) ? result.data : []);
+      setCloudSource(result.source);
+      setCachedAt(result.cachedAt || null);
     } catch (err) {
       console.error("Gagal sinkronisasi analitik cloud:", err);
     } finally {
@@ -85,6 +89,11 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({ entries, appsScriptU
           <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">
             {loading ? 'Menyinkronkan Cloud...' : `Total Terdeteksi: ${mergedData.length} Titik`}
           </span>
+          {!loading && cloudSource === 'cache' && (
+            <span className="text-[8px] font-black text-amber-600 uppercase tracking-widest bg-amber-50 px-2 py-1 rounded-full">
+              CACHE OFFLINE
+            </span>
+          )}
         </div>
         <button 
           onClick={loadCloudData}
@@ -93,6 +102,14 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({ entries, appsScriptU
           Refresh Data
         </button>
       </div>
+
+      {!loading && cloudSource === 'cache' && cachedAt && (
+        <div className="px-1">
+          <p className="text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2">
+            Menampilkan cache cloud terakhir ({new Date(cachedAt).toLocaleString('id-ID')}).
+          </p>
+        </div>
+      )}
       
       <AnalyticsPanel entries={mergedData} />
     </div>

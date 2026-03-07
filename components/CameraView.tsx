@@ -10,6 +10,9 @@ interface CameraViewProps {
   formState: FormState;
   onFormStateChange: React.Dispatch<React.SetStateAction<FormState>>;
   entriesCount: number;
+  pendingCount: number;
+  isSyncing: boolean;
+  lastSyncAt: string | null;
   gps: GpsLocation | null;
   onGpsUpdate: (gps: GpsLocation) => void;
   onShowSheet: () => void;
@@ -23,7 +26,51 @@ const BRAND_NAME = "PT ENERGI BATUBARA LESTARI";
 
 const SHUTTER_SOUND_BASE64 = "data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU92T18AZm9vYmFyYmF6cXV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4enV4";
 
-export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, onFormStateChange, entriesCount, gps, onGpsUpdate, onShowSheet, showToast, isOnline }) => {
+const IconPanel = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <rect x="3" y="3" width="7" height="7" rx="1.5" />
+    <rect x="14" y="3" width="7" height="5" rx="1.5" />
+    <rect x="14" y="10" width="7" height="11" rx="1.5" />
+    <rect x="3" y="12" width="7" height="9" rx="1.5" />
+  </svg>
+);
+
+const IconHome = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <path d="M3 11.5 12 4l9 7.5" />
+    <path d="M6.5 10.5V20h11v-9.5" />
+    <path d="M10 20v-5h4v5" />
+  </svg>
+);
+
+const IconSwitchCamera = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <rect x="3" y="7" width="18" height="12" rx="2" />
+    <path d="m8 7 1.5-2h5L16 7" />
+    <path d="M9 12h6" />
+    <path d="m13 10 2 2-2 2" />
+    <path d="M15 14H9" />
+    <path d="m11 16-2-2 2-2" />
+  </svg>
+);
+
+const IconWarning = () => (
+  <svg viewBox="0 0 24 24" className="w-9 h-9" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <path d="M12 3 2.5 20h19L12 3Z" />
+    <path d="M12 9v5" />
+    <circle cx="12" cy="17" r="1" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const IconCamera = () => (
+  <svg viewBox="0 0 24 24" className="w-9 h-9" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <path d="M4 8h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2Z" />
+    <path d="m8 8 1.6-2h4.8L16 8" />
+    <circle cx="12" cy="14" r="4" />
+  </svg>
+);
+
+export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, onFormStateChange, entriesCount, pendingCount, isSyncing, lastSyncAt, gps, onGpsUpdate, onShowSheet, showToast, isOnline }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const shutterSoundRef = useRef<HTMLAudioElement>(null);
@@ -174,7 +221,7 @@ export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, on
   }, [onCapture, formState, gps, entriesCount, showToast]);
 
   return (
-    <div className="relative w-screen h-screen bg-black overflow-hidden flex items-center justify-center">
+    <div className="relative w-screen h-[100dvh] min-h-[100dvh] bg-black overflow-hidden flex items-center justify-center">
       <video 
         ref={videoRef} 
         autoPlay 
@@ -185,8 +232,8 @@ export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, on
       
       {(cameraError || needsUserAction) && (
         <div className="z-50 flex flex-col items-center gap-6 px-10 text-center animate-in fade-in duration-500">
-          <div className="w-20 h-20 bg-white/10 backdrop-blur-xl rounded-full flex items-center justify-center border border-white/20">
-            <span className="text-4xl">{cameraError ? '⚠️' : '📷'}</span>
+          <div className="w-20 h-20 bg-white/10 backdrop-blur-xl rounded-full flex items-center justify-center border border-white/20 text-white">
+            {cameraError ? <IconWarning /> : <IconCamera />}
           </div>
           <div className="space-y-2">
             <p className="text-white font-black text-sm uppercase tracking-widest leading-relaxed">
@@ -217,7 +264,7 @@ export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, on
       )}
 
       {!isOnline && (
-        <div className="absolute top-[calc(var(--safe-area-inset-top)+80px)] left-1/2 -translate-x-1/2 z-30 px-3 py-1 bg-amber-500 rounded-full flex items-center gap-2 shadow-lg animate-bounce">
+        <div className="absolute top-[calc(var(--safe-area-inset-top)+80px)] left-1/2 -translate-x-1/2 z-30 px-3 py-1 bg-amber-500/95 rounded-full flex items-center gap-2 shadow-lg">
           <span className="text-[10px] font-black text-white uppercase tracking-widest">Mode Offline</span>
         </div>
       )}
@@ -225,7 +272,7 @@ export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, on
       <canvas ref={canvasRef} className="hidden" />
       <audio ref={shutterSoundRef} src={SHUTTER_SOUND_BASE64} preload="auto" />
 
-      <div className="absolute top-0 left-0 right-0 p-5 flex justify-between items-start z-30 pointer-events-none safe-top">
+      <div className="absolute top-0 left-0 right-0 px-3 sm:px-5 py-3 sm:py-5 flex justify-between items-start z-30 pointer-events-none safe-top">
         <div className="flex flex-col gap-3 pointer-events-auto">
           <Compass />
           <a 
@@ -234,7 +281,7 @@ export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, on
             rel="noopener noreferrer"
             className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-md border border-white/20 text-white flex items-center justify-center shadow-xl active:scale-90 transition-all hover:bg-black/60"
           >
-            <span className="text-lg">🏠</span>
+            <IconHome />
           </a>
         </div>
 
@@ -247,6 +294,21 @@ export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, on
               <div className="w-20 h-1 bg-white/10 rounded-full mt-1.5 overflow-hidden">
                 <div className="h-full bg-blue-500 transition-all duration-700" style={{ width: `${progressPercentage}%` }} />
               </div>
+           </div>
+
+           <div className="bg-black/30 backdrop-blur-md px-3 py-1.5 rounded-2xl border border-white/10 shadow-lg w-[170px]">
+             <div className="flex items-center justify-between">
+               <span className="text-[8px] font-black text-white/60 uppercase tracking-widest">Sync</span>
+               <span className={`text-[8px] font-black uppercase tracking-widest ${isSyncing ? 'text-blue-300' : isOnline ? 'text-emerald-300' : 'text-amber-300'}`}>
+                 {isSyncing ? 'SYNCING' : isOnline ? 'ONLINE' : 'OFFLINE'}
+               </span>
+             </div>
+             <div className="mt-1 flex items-center justify-between">
+               <span className="text-[8px] text-white/50 font-bold">Pending: {pendingCount}</span>
+               <span className="text-[8px] text-white/50 font-bold">
+                 {lastSyncAt ? new Date(lastSyncAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '--:--'}
+               </span>
+             </div>
            </div>
            
            {!gps && (
@@ -261,15 +323,15 @@ export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, on
       <InfoOverlay formState={formState} entriesCount={entriesCount} gps={gps} />
       
       <div className="absolute bottom-0 left-0 right-0 z-40 safe-bottom">
-        <div className="mx-4 mb-6 space-y-4">
+        <div className="mx-3 sm:mx-4 mb-3 sm:mb-6 space-y-3 sm:space-y-4">
           
-          <div className="bg-black/40 backdrop-blur-2xl rounded-[2.5rem] border border-white/10 p-5 flex flex-col gap-4 shadow-2xl">
+          <div className="bg-black/35 backdrop-blur-2xl rounded-[2rem] sm:rounded-[2.5rem] border border-white/10 p-4 sm:p-5 flex flex-col gap-3 sm:gap-4 shadow-2xl">
             <div className="flex justify-between items-center px-2">
               <div className="flex items-center gap-2">
                 <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
                 <span className="text-[10px] font-black text-white uppercase tracking-widest">Pengaturan Tinggi</span>
               </div>
-              <span className="text-sm font-black text-white bg-blue-600 px-4 py-1.5 rounded-2xl shadow-[0_0_15px_rgba(37,99,235,0.4)] border border-blue-400/30">
+              <span className="text-xs sm:text-sm font-black text-white bg-blue-600 px-3 sm:px-4 py-1.5 rounded-2xl shadow-[0_0_15px_rgba(37,99,235,0.4)] border border-blue-400/30">
                 {formState.tinggi} cm
               </span>
             </div>
@@ -278,66 +340,70 @@ export const CameraView: React.FC<CameraViewProps> = ({ onCapture, formState, on
               <input 
                 type="range" min="5" max="1500" value={formState.tinggi} 
                 onChange={e => onFormStateChange(prev => ({ ...prev, tinggi: parseInt(e.target.value) }))}
-                className="w-full h-4 bg-blue-600/30 rounded-full appearance-none cursor-pointer outline-none
-                  [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-10 [&::-webkit-slider-thumb]:h-10 
+                className="w-full h-3.5 sm:h-4 bg-blue-600/30 rounded-full appearance-none cursor-pointer outline-none
+                  [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-8 [&::-webkit-slider-thumb]:h-8 sm:[&::-webkit-slider-thumb]:w-10 sm:[&::-webkit-slider-thumb]:h-10 
                   [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white 
                   [&::-webkit-slider-thumb]:shadow-[0_0_25px_rgba(255,255,255,0.9),0_0_10px_rgba(0,0,0,0.2)] 
                   [&::-webkit-slider-thumb]:border-4 [&::-webkit-slider-thumb]:border-blue-500
-                  [&::-moz-range-thumb]:w-10 [&::-moz-range-thumb]:h-10 [&::-moz-range-thumb]:border-4 [&::-moz-range-thumb]:border-blue-500
+                  [&::-moz-range-thumb]:w-8 [&::-moz-range-thumb]:h-8 sm:[&::-moz-range-thumb]:w-10 sm:[&::-moz-range-thumb]:h-10 [&::-moz-range-thumb]:border-4 [&::-moz-range-thumb]:border-blue-500
                   [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-white" 
               />
             </div>
           </div>
 
-          <div className="flex justify-between items-center px-2">
+          <div className="px-2 -mt-1">
+            <div className="flex gap-1.5 overflow-x-auto no-scrollbar py-1.5 px-2 rounded-2xl bg-black/20 backdrop-blur-md border border-white/10 shadow-lg">
+              {PLANT_TYPES.map(type => (
+                <button
+                  key={type}
+                  onClick={() => onFormStateChange(prev => ({ ...prev, jenis: type }))}
+                  className={`flex-shrink-0 px-2.5 sm:px-3 py-1.5 rounded-xl text-[8px] sm:text-[9px] font-black tracking-widest border transition-all duration-300 ${
+                    formState.jenis === type
+                      ? 'bg-white/85 border-white/80 text-slate-900 shadow-sm'
+                      : 'bg-black/10 border-white/20 text-white/85 hover:bg-white/10'
+                  }`}
+                >
+                  {type.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex justify-between items-center px-2 pt-1">
             <button 
               onClick={onShowSheet} 
               className="w-14 h-14 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-white flex items-center justify-center shadow-xl active:scale-90 transition-all hover:bg-black/60"
             >
-              <span className="text-xl">📊</span>
+              <IconPanel />
             </button>
 
-            {/* TOMBOL CAPTURE PUTIH BOLD (SOLID) */}
-            <button 
-              onClick={handleCaptureClick} 
-              disabled={cameraLoading || !!cameraError || needsUserAction}
-              className="group relative w-28 h-28 flex items-center justify-center active:scale-95 transition-all disabled:opacity-20"
-            >
-              {/* Ring Luar Putih Solid */}
-              <div className="absolute inset-0 rounded-full border-[6px] border-white scale-110 group-active:scale-100 transition-transform shadow-[0_0_30px_rgba(255,255,255,0.2)]" />
-              
-              {/* Lingkaran Dalam Putih Solid */}
-              <div className="w-20 h-20 bg-white rounded-full flex items-center justify-center transition-all group-hover:scale-105 shadow-2xl ring-4 ring-black/5">
-                {/* Visual Gap Circle */}
-                <div className="w-16 h-16 rounded-full border border-black/5" />
-              </div>
-              
-              {/* Efek Sentuh */}
-              <div className="absolute w-8 h-8 bg-black/5 rounded-full opacity-0 group-active:opacity-100 transition-opacity" />
-            </button>
+            <div className="flex items-center justify-center">
+              {/* TOMBOL CAPTURE PUTIH BOLD (SOLID) */}
+              <button 
+                onClick={handleCaptureClick} 
+                disabled={cameraLoading || !!cameraError || needsUserAction}
+                className="group relative w-24 h-24 sm:w-28 sm:h-28 flex items-center justify-center active:scale-95 transition-all disabled:opacity-20"
+              >
+                {/* Ring Luar Putih Solid */}
+                <div className="absolute inset-0 rounded-full border-[6px] border-white scale-110 group-active:scale-100 transition-transform shadow-[0_0_30px_rgba(255,255,255,0.2)]" />
+                
+                {/* Lingkaran Dalam Putih Solid */}
+                <div className="w-16 h-16 sm:w-20 sm:h-20 bg-white rounded-full flex items-center justify-center transition-all group-hover:scale-105 shadow-2xl ring-4 ring-black/5">
+                  {/* Visual Gap Circle */}
+                  <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-full border border-black/5" />
+                </div>
+                
+                {/* Efek Sentuh */}
+                <div className="absolute w-8 h-8 bg-black/5 rounded-full opacity-0 group-active:opacity-100 transition-opacity" />
+              </button>
+            </div>
 
             <button 
               onClick={handleSwitchCamera} 
               className="w-14 h-14 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-white flex items-center justify-center shadow-xl active:scale-90 transition-all hover:bg-black/60"
             >
-              <span className="text-xl">🔄</span>
+              <IconSwitchCamera />
             </button>
-          </div>
-          
-          <div className="flex gap-2 overflow-x-auto no-scrollbar py-2 px-1">
-            {PLANT_TYPES.map(type => (
-              <button 
-                key={type} 
-                onClick={() => onFormStateChange(prev => ({ ...prev, jenis: type }))}
-                className={`flex-shrink-0 px-6 py-3 rounded-2xl text-[10px] font-black tracking-widest border transition-all duration-300 ${
-                  formState.jenis === type 
-                  ? 'bg-white border-white text-slate-900 shadow-[0_10px_20px_rgba(255,255,255,0.2)] scale-105' 
-                  : 'bg-black/30 border-white/10 text-white/40 backdrop-blur-md hover:bg-black/50'
-                }`}
-              >
-                {type.toUpperCase()}
-              </button>
-            ))}
           </div>
 
         </div>

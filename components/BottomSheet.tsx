@@ -8,6 +8,44 @@ const AnalyticsTab = lazy(() => import('./AnalyticsTab').then(m => ({ default: m
 const SettingsTab = lazy(() => import('./SettingsTab').then(m => ({ default: m.SettingsTab })));
 const OnlineDashboardTab = lazy(() => import('./OnlineDashboardTab').then(m => ({ default: m.OnlineDashboardTab })));
 
+const IconInput = () => (
+  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <path d="M4 20h16" />
+    <path d="M5 16.5V6.8a2 2 0 0 1 .6-1.4l2-2a2 2 0 0 1 1.4-.6h9a2 2 0 0 1 2 2v11.7" />
+    <path d="M8 8h8M8 12h8" />
+  </svg>
+);
+
+const IconAnalytics = () => (
+  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <path d="M4 20h16" />
+    <rect x="6" y="11" width="3" height="7" rx="1" />
+    <rect x="11" y="7" width="3" height="11" rx="1" />
+    <rect x="16" y="4" width="3" height="14" rx="1" />
+  </svg>
+);
+
+const IconHistory = () => (
+  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <path d="M3 12a9 9 0 1 0 3-6.7" />
+    <path d="M3 4v4h4" />
+    <path d="M12 7v6l4 2" />
+  </svg>
+);
+
+const IconCloud = () => (
+  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <path d="M20 16.5a4 4 0 0 0-1.3-7.8A6 6 0 0 0 7 7.5 4.5 4.5 0 0 0 7.5 16h12.2Z" />
+  </svg>
+);
+
+const IconSettings = () => (
+  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <path d="M12 15.5A3.5 3.5 0 1 0 12 8.5a3.5 3.5 0 0 0 0 7Z" />
+    <path d="m19.4 15 1.2 2.1-2.1 2.1-2.1-1.2a7.8 7.8 0 0 1-1.8.7L14 21h-4l-.6-2.3a7.8 7.8 0 0 1-1.8-.7l-2.1 1.2-2.1-2.1L4.6 15a7.8 7.8 0 0 1-.7-1.8L1.6 12l2.3-.6a7.8 7.8 0 0 1 .7-1.8L3.4 7.5l2.1-2.1 2.1 1.2a7.8 7.8 0 0 1 1.8-.7L10 3.6h4l.6 2.3a7.8 7.8 0 0 1 1.8.7l2.1-1.2 2.1 2.1-1.2 2.1c.3.6.6 1.2.7 1.8l2.3.6-2.3.6a7.8 7.8 0 0 1-.7 1.8Z" />
+  </svg>
+);
+
 interface BottomSheetProps {
   isOpen: boolean;
   onClose: () => void;
@@ -55,18 +93,21 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
         <div className="px-6 pb-6">
           <nav className="flex items-center bg-slate-100 p-1.5 rounded-[1.5rem] border border-slate-200 shadow-inner overflow-x-auto no-scrollbar">
             {[
-              { id: 'form', label: '📝 Input' },
-              { id: 'grafik', label: '📊 Analitik' },
-              { id: 'data', label: '💾 Histori' },
-              { id: 'dashboard', label: '☁️ Cloud' },
-              { id: 'pengaturan', label: '⚙️' }
+              { id: 'form', label: 'Input', icon: <IconInput /> },
+              { id: 'grafik', label: 'Analitik', icon: <IconAnalytics /> },
+              { id: 'data', label: 'Histori', icon: <IconHistory /> },
+              { id: 'dashboard', label: 'Cloud', icon: <IconCloud /> },
+              { id: 'pengaturan', label: 'Setelan', icon: <IconSettings /> }
             ].map((tab) => (
               <button 
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)} 
                 className={`flex-1 min-w-[90px] py-3 rounded-2xl text-[10px] font-black uppercase tracking-wider transition-all duration-300 ${activeTab === tab.id ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}
               >
-                {tab.label}
+                <span className="flex items-center justify-center gap-1.5">
+                  {tab.icon}
+                  <span>{tab.label}</span>
+                </span>
               </button>
             ))}
           </nav>

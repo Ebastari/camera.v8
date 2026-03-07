@@ -1,6 +1,13 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 
+const IconCompass = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <circle cx="12" cy="12" r="9" />
+    <path d="m9 9 6-2-2 6-6 2 2-6Z" />
+  </svg>
+);
+
 export const Compass: React.FC = () => {
   const [heading, setHeading] = useState<number | null>(null);
   const [needsPermission, setNeedsPermission] = useState(false);
@@ -74,7 +81,7 @@ export const Compass: React.FC = () => {
         className="w-12 h-12 rounded-full bg-blue-600/80 backdrop-blur-md text-white flex items-center justify-center border border-white/40 shadow-lg animate-bounce pointer-events-auto"
         title="Aktifkan Kompas"
       >
-        <span className="text-lg">🧭</span>
+        <IconCompass />
       </button>
     );
   }
