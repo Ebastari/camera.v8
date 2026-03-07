@@ -35,8 +35,9 @@ const dataUrlToFile = async (dataUrl: string, fileName: string): Promise<File> =
 
 const GPS_ACCURACY_THRESHOLD_M = 20;
 const DESKTOP_GPS_ACCURACY_THRESHOLD_M = 60;
-const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwv1eXbUMODTxqoUrxuN2ezFb0E6E34hdJvmLHclmIC5v76yrnT5PvUuthYQahcaskwjA/exec';
+const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxcxJ2nTJpVqECVPkDhNo5ulpsL0G2KSdiwoOqpJeIBASVq_K3mFGpviIXDhPzcdre3sw/exec';
 const LEGACY_APPS_SCRIPT_URLS = [
+  'https://script.google.com/macros/s/AKfycbwv1eXbUMODTxqoUrxuN2ezFb0E6E34hdJvmLHclmIC5v76yrnT5PvUuthYQahcaskwjA/exec',
   'https://script.google.com/macros/s/AKfycbw_B-b96eu94j562hLAYKTMLLe9XhTMDS5JhL_GoPzb5OGpDrQ2JHfaiPgXW4lUbMwV_Q/exec',
   'https://script.google.com/macros/s/AKfycbxPDvlK5Xk2WgcEsbqZtUH-k69_Xj3oXU8ciOJP8Y3e0twb4O-T1rNwLWUUTsTt2tmu9A/exec',
 ];
@@ -377,19 +378,28 @@ const App: React.FC = () => {
             throw new Error(result.message);
           }
 
-          await updateEntrySyncMeta(entry.id, {
-            uploaded: true,
-            retryCount: 0,
-            lastSyncAttemptAt: attemptAt,
-            lastSyncError: '',
-          });
-          if (!result.confirmed) {
+          if (result.confirmed) {
+            await updateEntrySyncMeta(entry.id, {
+              uploaded: true,
+              retryCount: 0,
+              lastSyncAttemptAt: attemptAt,
+              lastSyncError: '',
+            });
+            successCount++;
+          } else {
+            const nextRetry = (entry.retryCount || 0) + 1;
+            await updateEntrySyncMeta(entry.id, {
+              uploaded: false,
+              retryCount: nextRetry,
+              lastSyncAttemptAt: attemptAt,
+              lastSyncError: result.message || 'Belum terverifikasi oleh server (mode no-cors).',
+            });
             unconfirmedCount += 1;
           }
-          successCount++;
         } catch (error) {
           const nextRetry = (entry.retryCount || 0) + 1;
           await updateEntrySyncMeta(entry.id, {
+            uploaded: false,
             retryCount: nextRetry,
             lastSyncAttemptAt: attemptAt,
             lastSyncError: error instanceof Error ? error.message : 'Sinkronisasi gagal.',
@@ -400,12 +410,13 @@ const App: React.FC = () => {
         }
       }
 
-      if (successCount > 0) {
+      if (successCount > 0 || unconfirmedCount > 0) {
         const updatedData = await getAllEntries();
         setEntries(updatedData);
         setLastSyncAt(new Date().toISOString());
         if (unconfirmedCount > 0) {
-          showToast(`${successCount} data terkirim (${unconfirmedCount} belum terverifikasi).`, 'info');
+          const prefix = successCount > 0 ? `${successCount} data terverifikasi.` : 'Belum ada data terverifikasi.';
+          showToast(`${prefix} ${unconfirmedCount} data masih pending verifikasi.`, 'info');
         } else {
           showToast(
             isBackground ? `Auto-sync berhasil untuk ${successCount} data.` : `${successCount} data berhasil diunggah`,
@@ -544,6 +555,7 @@ const App: React.FC = () => {
       gpsQualityAtCapture,
       gpsAccuracyAtCapture: hasValidGps ? gps.accuracy : undefined,
       rawKoordinat: `${rawLat.toFixed(6)},${rawLon.toFixed(6)}`,
+      revisedKoordinat: `${lat.toFixed(6)},${lon.toFixed(6)}`,
       gridAnchorKoordinat: anchorForCapture
         ? `${anchorForCapture.lat.toFixed(6)},${anchorForCapture.lon.toFixed(6)}`
         : undefined,
@@ -629,18 +641,30 @@ const App: React.FC = () => {
             throw new Error(result.message);
           }
 
-          await updateEntrySyncMeta(finalEntry.id, {
-            uploaded: true,
-            retryCount: 0,
-            lastSyncAttemptAt: attemptAt,
-            lastSyncError: '',
-          });
-          setEntries(prev => prev.map(e => e.id === finalEntry.id ? { ...e, uploaded: true } : e));
-          setLastSyncAt(new Date().toISOString());
-          showToast(result.confirmed ? 'Berhasil Tersinkron!' : 'Data terkirim, menunggu verifikasi cloud.', result.confirmed ? 'success' : 'info');
+          if (result.confirmed) {
+            await updateEntrySyncMeta(finalEntry.id, {
+              uploaded: true,
+              retryCount: 0,
+              lastSyncAttemptAt: attemptAt,
+              lastSyncError: '',
+            });
+            setEntries(prev => prev.map(e => e.id === finalEntry.id ? { ...e, uploaded: true, retryCount: 0, lastSyncError: '' } : e));
+            setLastSyncAt(new Date().toISOString());
+            showToast('Berhasil Tersinkron!', 'success');
+          } else {
+            await updateEntrySyncMeta(finalEntry.id, {
+              uploaded: false,
+              retryCount: 1,
+              lastSyncAttemptAt: attemptAt,
+              lastSyncError: result.message || 'Belum terverifikasi oleh server (mode no-cors).',
+            });
+            setEntries(prev => prev.map(e => e.id === finalEntry.id ? { ...e, uploaded: false, retryCount: 1, lastSyncError: result.message } : e));
+            showToast('Data belum terverifikasi cloud. Tetap di antrian retry.', 'info');
+          }
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Gagal Sinkron, Tersimpan Lokal.';
           await updateEntrySyncMeta(finalEntry.id, {
+            uploaded: false,
             retryCount: (finalEntry.retryCount || 0) + 1,
             lastSyncAttemptAt: new Date().toISOString(),
             lastSyncError: message,

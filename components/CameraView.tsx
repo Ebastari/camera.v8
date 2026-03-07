@@ -397,10 +397,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
               </div>
 
               <p className="mt-1 text-[8px] text-white/75 font-bold truncate">
-                RAW {gps ? `${gps.lat.toFixed(6)}, ${gps.lon.toFixed(6)}` : '--'}
+                KOORDINAT ASLI {gps ? `${gps.lat.toFixed(6)}, ${gps.lon.toFixed(6)}` : '--'}
               </p>
               <p className="mt-0.5 text-[8px] text-emerald-200 font-bold truncate">
-                SNAP {effectiveCoordinate ? `${effectiveCoordinate.lat.toFixed(6)}, ${effectiveCoordinate.lon.toFixed(6)}` : '--'}
+                KOORDINAT REVISI {effectiveCoordinate ? `${effectiveCoordinate.lat.toFixed(6)}, ${effectiveCoordinate.lon.toFixed(6)}` : '--'}
               </p>
 
               {gridAnchor && (
@@ -409,7 +409,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
                 </p>
               )}
               <p className="mt-0.5 text-[7px] text-white/45">
-                Step berubah saat geser melewati batas grid.
+                Atas: koordinat asli, bawah: koordinat revisi grid 4x4.
               </p>
 
               <div className="mt-2 grid grid-cols-2 gap-1.5">

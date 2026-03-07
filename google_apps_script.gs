@@ -312,20 +312,50 @@ function appendMonitoringRow_(sheet, payload) {
 
   const coords = resolveCoordinates_(payload);
   const lokasiRaw = String(payload.Lokasi || payload.lokasi || coords.text).trim();
-  const koordinatRaw = String(payload.Koordinat || payload.koordinat || coords.text).trim();
+  const koordinatRaw = String(payload.Koordinat || payload.koordinat || payload.Koordinat_Revisi || payload.koordinatRevisi || coords.text).trim();
+  const koordinatAsliRaw = String(payload.Koordinat_Asli || payload.koordinatAsli || payload.rawKoordinat || '').trim();
+  const koordinatRevisiRaw = String(payload.Koordinat_Revisi || payload.koordinatRevisi || '').trim();
   const lokasi = lokasiRaw.toLowerCase().includes('nan') ? coords.text : lokasiRaw;
   const koordinatUser = koordinatRaw.toLowerCase().includes('nan') ? coords.text : koordinatRaw;
 
-  const userFixed = getFixedLatLon_(payload.X !== undefined ? payload.X : coords.lat, payload.Y !== undefined ? payload.Y : coords.lon, koordinatUser || lokasi);
-  const revisedFixed = computeRevisedCoordinate_(sheet, headerIndex, userFixed);
+  const originalFixedFromPayload = getFixedLatLon_(
+    payload.X_Asli !== undefined ? payload.X_Asli : payload.xAsli,
+    payload.Y_Asli !== undefined ? payload.Y_Asli : payload.yAsli,
+    koordinatAsliRaw,
+  );
+  const originalFixedFallback = getFixedLatLon_(
+    payload.X !== undefined ? payload.X : coords.lat,
+    payload.Y !== undefined ? payload.Y : coords.lon,
+    koordinatAsliRaw || koordinatUser || lokasi,
+  );
+  const originalFixed = originalFixedFromPayload || originalFixedFallback;
 
-  const koordinatAsli = userFixed ? toCoordinateText_(userFixed.lat, userFixed.lon) : koordinatUser;
-  const koordinatRevisi = revisedFixed ? toCoordinateText_(revisedFixed.lat, revisedFixed.lon) : koordinatAsli;
+  const revisedFixedFromPayload = getFixedLatLon_(
+    payload.X !== undefined ? payload.X : coords.lat,
+    payload.Y !== undefined ? payload.Y : coords.lon,
+    koordinatRevisiRaw || koordinatUser || lokasi,
+  );
+  const revisedFixed = revisedFixedFromPayload || computeRevisedCoordinate_(sheet, headerIndex, originalFixed);
+
+  const koordinatAsli = originalFixed
+    ? toCoordinateText_(originalFixed.lat, originalFixed.lon)
+    : (koordinatAsliRaw || koordinatUser);
+  const koordinatRevisi = revisedFixed
+    ? toCoordinateText_(revisedFixed.lat, revisedFixed.lon)
+    : (koordinatRevisiRaw || koordinatAsli);
   const koordinat = koordinatRevisi || koordinatAsli || koordinatUser;
 
   // Y dipertahankan sebagai longitude, X sebagai latitude agar kompatibel data lama aplikasi.
-  const y = revisedFixed ? revisedFixed.lon : (Number.isFinite(coords.lon) ? coords.lon : '');
-  const x = revisedFixed ? revisedFixed.lat : (Number.isFinite(coords.lat) ? coords.lat : '');
+  const y = revisedFixed
+    ? revisedFixed.lon
+    : originalFixed
+      ? originalFixed.lon
+      : (Number.isFinite(coords.lon) ? coords.lon : '');
+  const x = revisedFixed
+    ? revisedFixed.lat
+    : originalFixed
+      ? originalFixed.lat
+      : (Number.isFinite(coords.lat) ? coords.lat : '');
 
   const linkDrive = saveImageAndReturnUrl_(payload, id) || String(payload['Link Drive'] || payload.linkDrive || '').trim();
   const poop = String(payload.poop || buildPoopHtml_(linkDrive)).trim();

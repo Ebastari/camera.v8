@@ -7,12 +7,52 @@ export interface UploadResult {
   message: string;
 }
 
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
 const isLikelyAppsScriptUrl = (url: string): boolean => {
   const clean = url.trim();
   return /^https:\/\/script\.google\.com\//i.test(clean) && /\/exec(?:[/?#].*)?$/i.test(clean);
 };
 
 const normalizeUrl = (url: string): string => url.trim();
+
+const isEntryPersistedInCloud = async (url: string, entryId: string): Promise<boolean> => {
+  const cleanUrl = normalizeUrl(url);
+  const separator = cleanUrl.includes('?') ? '&' : '?';
+  const listUrl = `${cleanUrl}${separator}action=list&limit=30&offset=0&order=desc`;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      await sleep(700 * attempt);
+    }
+
+    try {
+      const response = await fetch(listUrl, {
+        method: 'GET',
+        mode: 'cors',
+        cache: 'no-store',
+      });
+
+      if (!response.ok) {
+        continue;
+      }
+
+      const result = await response.json();
+      const rows = Array.isArray(result?.data) ? result.data : [];
+      const found = rows.some((row: any) => String(row?.ID || '').trim() === entryId);
+      if (found) {
+        return true;
+      }
+    } catch {
+      // Abaikan kegagalan probe verifikasi, lanjut retry singkat.
+    }
+  }
+
+  return false;
+};
 
 export const uploadToAppsScript = async (url: string, entry: PlantEntry): Promise<UploadResult> => {
   const cleanUrl = normalizeUrl(url);
@@ -45,6 +85,8 @@ export const uploadToAppsScript = async (url: string, entry: PlantEntry): Promis
   const safeX = Number.isFinite(entry.x) ? entry.x : NaN;
   const safeY = Number.isFinite(entry.y) ? entry.y : NaN;
   const safeCoordText = buildCoordText(safeX, safeY);
+  const originalCoordText = String(entry.rawKoordinat || '').trim() || safeCoordText;
+  const revisedCoordText = String(entry.revisedKoordinat || '').trim() || String(entry.koordinat || '').trim() || safeCoordText;
 
   // Teks path yang akan digunakan sebagai nama file di Drive dan referensi di Sheet
   const pathName = `Montana V2_Images/Gambar Montana (${entry.id}).jpg`;
@@ -70,7 +112,9 @@ export const uploadToAppsScript = async (url: string, entry: PlantEntry): Promis
     "Lokasi": entry.lokasi?.includes('NaN') ? safeCoordText : entry.lokasi,
     "Pekerjaan": entry.pekerjaan || "",
     "Tinggi": entry.tinggi,
-    "Koordinat": entry.koordinat?.includes('NaN') ? safeCoordText : entry.koordinat,
+    "Koordinat": revisedCoordText.includes('NaN') ? safeCoordText : revisedCoordText,
+    "Koordinat_Asli": originalCoordText,
+    "Koordinat_Revisi": revisedCoordText,
     "Y": formatCoord(safeY), // Longitude
     "X": formatCoord(safeX), // Latitude
     "Tanaman": entry.tanaman,
@@ -140,7 +184,7 @@ export const uploadToAppsScript = async (url: string, entry: PlantEntry): Promis
     };
   } catch {
     // 2) Fallback no-cors untuk deployment Apps Script yang tidak membuka CORS.
-    // Pada mode ini respons tidak bisa dibaca, jadi dianggap terkirim namun tidak terverifikasi.
+    // Setelah kirim no-cors, coba verifikasi via endpoint list terbaru.
     try {
       await fetch(cleanUrl, {
         method: 'POST',
@@ -151,10 +195,19 @@ export const uploadToAppsScript = async (url: string, entry: PlantEntry): Promis
         body: JSON.stringify(payload),
       });
 
+      const verified = await isEntryPersistedInCloud(cleanUrl, entry.id);
+      if (verified) {
+        return {
+          ok: true,
+          confirmed: true,
+          message: 'Data tersimpan dan terverifikasi lewat pengecekan list terbaru.',
+        };
+      }
+
       return {
         ok: true,
         confirmed: false,
-        message: 'Permintaan terkirim (no-cors), hasil tidak bisa diverifikasi otomatis.',
+        message: 'Permintaan no-cors terkirim, namun verifikasi ID belum ditemukan.',
       };
     } catch (error) {
       return {

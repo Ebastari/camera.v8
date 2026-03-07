@@ -25,6 +25,7 @@ export interface PlantEntry {
   gpsQualityAtCapture?: 'Tinggi' | 'Sedang' | 'Rendah' | 'Tidak Tersedia';
   gpsAccuracyAtCapture?: number;
   rawKoordinat?: string;
+  revisedKoordinat?: string;
   gridAnchorKoordinat?: string;
   distanceFromAnchorM?: number;
   snappedToGrid?: boolean;
