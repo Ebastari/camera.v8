@@ -8,11 +8,19 @@ interface OnlineDashboardTabProps {
 }
 
 export const OnlineDashboardTab: React.FC<OnlineDashboardTabProps> = ({ appsScriptUrl, isOnline }) => {
+  const ANALYSIS_PASSWORD = 'agungganteng';
+
   const [data, setData] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [source, setSource] = useState<'network' | 'cache'>('network');
   const [cachedAt, setCachedAt] = useState<string | null>(null);
+  const [unlockInput, setUnlockInput] = useState('');
+  const [isUnlocked, setIsUnlocked] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+  const [aiSummary, setAiSummary] = useState<string>('');
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
 
   const loadData = async () => {
     if (!appsScriptUrl || appsScriptUrl.includes('/s/.../exec')) {
@@ -56,6 +64,94 @@ export const OnlineDashboardTab: React.FC<OnlineDashboardTabProps> = ({ appsScri
       rataTinggi: (totalTinggi / total).toFixed(1)
     };
   }, [data]);
+
+  const ecologyMetrics = useMemo(() => {
+    const safeData = Array.isArray(data) ? data : [];
+
+    const sehat = safeData.filter((d) => d && d.Kesehatan === 'Sehat').length;
+    const merana = safeData.filter((d) => d && d.Kesehatan === 'Merana').length;
+    const mati = safeData.filter((d) => d && d.Kesehatan === 'Mati').length;
+
+    const jenisCount: Record<string, number> = {};
+    safeData.forEach((item) => {
+      const name = item?.Tanaman ? String(item.Tanaman) : 'Unknown';
+      jenisCount[name] = (jenisCount[name] || 0) + 1;
+    });
+
+    const jenisTop = Object.entries(jenisCount)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 3);
+
+    return {
+      total: safeData.length,
+      sehat,
+      merana,
+      mati,
+      persenSehat: safeData.length > 0 ? Number(((sehat / safeData.length) * 100).toFixed(1)) : 0,
+      rataTinggi: Number(stats.rataTinggi),
+      jenisTop,
+    };
+  }, [data, stats.rataTinggi]);
+
+  const dataFingerprint = useMemo(() => {
+    return JSON.stringify({
+      total: ecologyMetrics.total,
+      sehat: ecologyMetrics.sehat,
+      merana: ecologyMetrics.merana,
+      mati: ecologyMetrics.mati,
+      rataTinggi: ecologyMetrics.rataTinggi,
+      jenisTop: ecologyMetrics.jenisTop,
+    });
+  }, [ecologyMetrics]);
+
+  const requestAiSummary = async () => {
+    if (ecologyMetrics.total === 0) {
+      setAiSummary('Belum ada data cloud untuk dianalisis.');
+      setAnalysisError(null);
+      return;
+    }
+
+    setIsAnalyzing(true);
+    setAnalysisError(null);
+    try {
+      const response = await fetch('/api/ecology-summary', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ metrics: ecologyMetrics }),
+      });
+
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result?.error || 'Gagal membuat analisis ekologi.');
+      }
+
+      setAiSummary(result?.summary || 'Analisis tersedia, tetapi respons kosong.');
+    } catch (err: any) {
+      setAnalysisError(err?.message || 'Gagal membuat analisis ekologi.');
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  const handleUnlock = () => {
+    if (unlockInput === ANALYSIS_PASSWORD) {
+      setIsUnlocked(true);
+      setUnlockError(null);
+      return;
+    }
+    setIsUnlocked(false);
+    setUnlockError('Password salah.');
+  };
+
+  useEffect(() => {
+    if (!isUnlocked) {
+      return;
+    }
+    void requestAiSummary();
+  }, [isUnlocked, dataFingerprint]);
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 pb-10">
@@ -128,6 +224,55 @@ export const OnlineDashboardTab: React.FC<OnlineDashboardTabProps> = ({ appsScri
           <div className="bg-slate-50 p-4 rounded-[2rem] border border-slate-100 flex justify-between items-center shadow-inner">
             <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">Rata-rata Tinggi</span>
             <span className="text-sm font-black text-slate-800 mr-2">{stats.rataTinggi} CM</span>
+          </div>
+
+          <div className="bg-white p-4 rounded-[2rem] border border-slate-100 shadow-sm space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-[10px] font-black text-slate-700 uppercase tracking-widest">Analisis Ekologi Ringkas</h4>
+              <span className="text-[8px] font-black text-indigo-700 bg-indigo-50 px-2 py-1 rounded-full uppercase">AI Lock</span>
+            </div>
+
+            {!isUnlocked ? (
+              <div className="space-y-2">
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    value={unlockInput}
+                    onChange={(e) => setUnlockInput(e.target.value)}
+                    placeholder="Masukkan password"
+                    className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold outline-none focus:ring-2 focus:ring-indigo-200"
+                  />
+                  <button
+                    onClick={handleUnlock}
+                    className="px-3 py-2 rounded-xl bg-indigo-600 text-white text-[10px] font-black uppercase tracking-widest active:scale-95"
+                  >
+                    Buka
+                  </button>
+                </div>
+                {unlockError && <p className="text-[9px] font-bold text-red-600">{unlockError}</p>}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-[9px] font-black text-emerald-700 uppercase tracking-widest">Akses terbuka</p>
+                  <button
+                    onClick={requestAiSummary}
+                    disabled={isAnalyzing}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-[9px] font-black uppercase tracking-wider disabled:opacity-50"
+                  >
+                    {isAnalyzing ? 'Menganalisis...' : 'Refresh Analisis'}
+                  </button>
+                </div>
+
+                {analysisError ? (
+                  <p className="text-[10px] font-bold text-red-600">{analysisError}</p>
+                ) : (
+                  <p className="text-[10px] font-bold text-slate-700 leading-relaxed">
+                    {isAnalyzing ? 'Membuat analisis ekologi...' : (aiSummary || 'Analisis belum tersedia.')}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
           {/* List Data Terakhir */}
