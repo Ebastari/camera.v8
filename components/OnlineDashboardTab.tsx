@@ -25,6 +25,36 @@ export const OnlineDashboardTab: React.FC<OnlineDashboardTabProps> = ({ appsScri
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
 
+  const parseHeight = (value: unknown): number => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+
+    const raw = String(value ?? '').trim();
+    if (!raw) {
+      return 0;
+    }
+
+    // Support values like "123,5", "123.5 cm", and "123 CM".
+    const normalized = raw.replace(',', '.').replace(/[^0-9.\-]+/g, '');
+    const parsed = Number.parseFloat(normalized);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const normalizeHealth = (value: unknown): 'Sehat' | 'Merana' | 'Mati' | 'Unknown' => {
+    const raw = String(value ?? '').trim().toLowerCase();
+    if (raw === 'sehat') {
+      return 'Sehat';
+    }
+    if (raw === 'merana') {
+      return 'Merana';
+    }
+    if (raw === 'mati') {
+      return 'Mati';
+    }
+    return 'Unknown';
+  };
+
   const loadData = async () => {
     if (!appsScriptUrl || appsScriptUrl.includes('/s/.../exec')) {
       setError("URL Apps Script belum dikonfigurasi di Tab Pengaturan.");
@@ -57,8 +87,8 @@ export const OnlineDashboardTab: React.FC<OnlineDashboardTabProps> = ({ appsScri
     if (safeData.length === 0) return { total: 0, sehat: 0, persenSehat: "0", rataTinggi: "0" };
     
     const total = safeData.length;
-    const sehat = safeData.filter(d => d && d.Kesehatan === 'Sehat').length;
-    const totalTinggi = safeData.reduce((acc, curr) => acc + (parseFloat(curr.Tinggi) || 0), 0);
+    const sehat = safeData.filter((d) => normalizeHealth(d?.Kesehatan) === 'Sehat').length;
+    const totalTinggi = safeData.reduce((acc, curr) => acc + parseHeight(curr?.Tinggi), 0);
     
     return {
       total,
@@ -71,9 +101,9 @@ export const OnlineDashboardTab: React.FC<OnlineDashboardTabProps> = ({ appsScri
   const ecologyMetrics = useMemo(() => {
     const safeData = Array.isArray(data) ? data : [];
 
-    const sehat = safeData.filter((d) => d && d.Kesehatan === 'Sehat').length;
-    const merana = safeData.filter((d) => d && d.Kesehatan === 'Merana').length;
-    const mati = safeData.filter((d) => d && d.Kesehatan === 'Mati').length;
+    const sehat = safeData.filter((d) => normalizeHealth(d?.Kesehatan) === 'Sehat').length;
+    const merana = safeData.filter((d) => normalizeHealth(d?.Kesehatan) === 'Merana').length;
+    const mati = safeData.filter((d) => normalizeHealth(d?.Kesehatan) === 'Mati').length;
 
     const jenisCount: Record<string, number> = {};
     safeData.forEach((item) => {
