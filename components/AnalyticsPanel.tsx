@@ -20,9 +20,6 @@ import {
   getCachedPhotoEcologyAnalyses,
   type CachedPhotoEcologyAnalysis,
 } from '../services/ecologyCacheService';
-import type { TreeRecord } from '../ecology/density';
-import { analyzeEcology } from '../ecology/ecologyReport';
-import { calculateCCI } from '../ecology/cci';
 import { estimateBiomass } from '../ecology/biomass';
 import { estimateCarbon } from '../ecology/carbon';
 import { calculateNDVI } from '../ecology/ndvi';
@@ -48,6 +45,20 @@ interface BatchProgress {
   failed: number;
 }
 
+interface CloudEcologySummary {
+  totalTrees: number;
+  healthyTrees: number;
+  unhealthyTrees: number;
+  totalBiomass: number;
+  totalCarbon: number;
+  canopyCoverPct: number;
+  hcvHealthIndex: number;
+  totalVolumeM3: number;
+  avgHeightCm: number;
+  medianHeightCm: number;
+  tallestHeightCm: number;
+}
+
 const getNDVILabel = (ndvi: number): string => {
   if (ndvi > 0.5) return 'Vegetasi Sehat';
   if (ndvi >= 0.2) return 'Vegetasi Sedang';
@@ -60,31 +71,42 @@ const getCanopyLabel = (cover: number): string => {
   return 'Hutan Jarang';
 };
 
-const estimateAreaHaFromTrees = (trees: TreeRecord[]): number => {
-  if (trees.length < 2) {
-    return 1;
-  }
-
-  const lats = trees.map((tree) => tree.lat);
-  const lons = trees.map((tree) => tree.lon);
-
-  const minLat = Math.min(...lats);
-  const maxLat = Math.max(...lats);
-  const minLon = Math.min(...lons);
-  const maxLon = Math.max(...lons);
-
-  const latMeters = (maxLat - minLat) * 111320;
-  const midLatRad = ((minLat + maxLat) / 2) * (Math.PI / 180);
-  const lonMeters = (maxLon - minLon) * 111320 * Math.cos(midLatRad);
-
-  const areaM2 = Math.max(1, Math.abs(latMeters * lonMeters));
-  return Math.max(0.01, areaM2 / 10000);
-};
-
 const round = (value: number, decimals = 2): number => {
   if (!Number.isFinite(value)) return 0;
   const p = 10 ** decimals;
   return Math.round(value * p) / p;
+};
+
+const toFinite = (value: unknown, fallback = 0): number => {
+  const num = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
+  return Number.isFinite(num) ? num : fallback;
+};
+
+const computeVolumeFromHeightCm = (heightCm: number): number => {
+  const safeHeight = Number.isFinite(heightCm) && heightCm > 0 ? heightCm : 0;
+  if (safeHeight === 0) {
+    return 0;
+  }
+
+  const h = safeHeight / 100;
+  const dCm = h <= 1.3 ? Math.max(0.5, h * 0.85) : Math.max(1, 0.85 * h ** 1.2);
+  const dM = dCm / 100;
+  const formFactor = 0.45;
+  return Math.PI * (dM / 2) ** 2 * h * formFactor;
+};
+
+const median = (values: number[]): number => {
+  const sorted = values
+    .filter((value) => Number.isFinite(value))
+    .slice()
+    .sort((a, b) => a - b);
+
+  if (sorted.length === 0) {
+    return 0;
+  }
+
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 };
 
 const getHighResImageUrl = (url: string): string => {
@@ -218,10 +240,16 @@ const MapAutoFit = ({ points }: { points: [number, number][] }) => {
   return null;
 };
 
-export const AnalyticsPanel: React.FC<{ entries: PlantEntry[] }> = ({ entries }) => {
+export const AnalyticsPanel: React.FC<{ entries: PlantEntry[]; appsScriptUrl: string }> = ({
+  entries,
+  appsScriptUrl,
+}) => {
   const [isLeafletReady, setIsLeafletReady] = useState(false);
   const [isImageAnalysisRunning, setIsImageAnalysisRunning] = useState(false);
   const [analysisMessage, setAnalysisMessage] = useState('');
+  const [cloudSummary, setCloudSummary] = useState<CloudEcologySummary | null>(null);
+  const [cloudSummarySource, setCloudSummarySource] = useState<'cloud' | 'local'>('local');
+  const [cloudSummaryLoading, setCloudSummaryLoading] = useState(false);
   const [batchProgress, setBatchProgress] = useState<BatchProgress>({
     active: false,
     done: 0,
@@ -314,6 +342,65 @@ export const AnalyticsPanel: React.FC<{ entries: PlantEntry[] }> = ({ entries })
   useEffect(() => {
     let active = true;
 
+    const loadCloudSummary = async () => {
+      const base = String(appsScriptUrl || '').trim();
+      if (!base || base.includes('/s/.../exec')) {
+        return;
+      }
+
+      setCloudSummaryLoading(true);
+      try {
+        const sep = base.includes('?') ? '&' : '?';
+        const url = `${base}${sep}action=analysis_ecology&t=${Date.now()}`;
+        const response = await fetch(url, { method: 'GET', cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const payload = await response.json();
+        const summary = payload?.summary;
+        if (!summary || !active) {
+          return;
+        }
+
+        const parsed: CloudEcologySummary = {
+          totalTrees: toFinite(summary.totalTrees),
+          healthyTrees: toFinite(summary.healthyTrees),
+          unhealthyTrees: toFinite(summary.unhealthyTrees),
+          totalBiomass: toFinite(summary.totalBiomass),
+          totalCarbon: toFinite(summary.totalCarbon),
+          canopyCoverPct: toFinite(summary.canopyCoverPct),
+          hcvHealthIndex: toFinite(summary.hcvHealthIndex),
+          totalVolumeM3: toFinite(summary.totalVolumeM3),
+          avgHeightCm: toFinite(summary.avgHeightCm),
+          medianHeightCm: toFinite(summary.medianHeightCm),
+          tallestHeightCm: toFinite(summary.tallestHeightCm),
+        };
+
+        setCloudSummary(parsed);
+        setCloudSummarySource('cloud');
+      } catch {
+        if (active) {
+          setCloudSummary(null);
+          setCloudSummarySource('local');
+        }
+      } finally {
+        if (active) {
+          setCloudSummaryLoading(false);
+        }
+      }
+    };
+
+    void loadCloudSummary();
+
+    return () => {
+      active = false;
+    };
+  }, [appsScriptUrl, entries.length]);
+
+  useEffect(() => {
+    let active = true;
+
     const preloadCachedMetrics = async () => {
       if (analyzableEntries.length === 0) {
         if (active) {
@@ -395,28 +482,44 @@ export const AnalyticsPanel: React.FC<{ entries: PlantEntry[] }> = ({ entries })
       .map((entry) => [entry.gps!.lat, entry.gps!.lon]);
   }, [entries]);
 
-  const treeRecords = useMemo<TreeRecord[]>(() => {
-    return entries
-      .filter((entry) => entry.gps && entry.gps.lat !== 0 && entry.gps.lon !== 0)
-      .map((entry) => ({
-        lat: entry.gps!.lat,
-        lon: entry.gps!.lon,
-        health: entry.kesehatan,
-        accuracy: entry.gps?.accuracy,
-      }));
-  }, [entries]);
-
-  const areaHa = useMemo(() => estimateAreaHaFromTrees(treeRecords), [treeRecords]);
-
   const ecologySummary = useMemo(() => {
-    const report = analyzeEcology(treeRecords, areaHa);
-    const cciGrade = calculateCCI(report.density, 625).grade;
+    const heights = entries
+      .map((entry) => Number(entry.tinggi))
+      .filter((value) => Number.isFinite(value) && value > 0);
+
+    const totalTrees = entries.length;
+    const healthyTrees = entries.filter((entry) => entry.kesehatan === 'Sehat').length;
+    const unhealthyTrees = Math.max(0, totalTrees - healthyTrees);
 
     const totalBiomass = round(
       entries.reduce((acc, entry) => acc + estimateBiomass(Number(entry.tinggi) || 0), 0),
       3,
     );
     const totalCarbon = round(estimateCarbon(totalBiomass), 3);
+    const totalVolumeM3 = round(
+      entries.reduce((acc, entry) => acc + computeVolumeFromHeightCm(Number(entry.tinggi) || 0), 0),
+      3,
+    );
+
+    const avgHeightCm = heights.length > 0 ? round(heights.reduce((a, b) => a + b, 0) / heights.length, 2) : 0;
+    const medianHeightCm = round(median(heights), 2);
+    const tallestHeightCm = heights.length > 0 ? round(Math.max(...heights), 2) : 0;
+
+    const canopyAreaM2 = heights.reduce((acc, heightCm) => {
+      const hM = heightCm / 100;
+      const crownDiameterM = Math.max(0.5, hM * 0.4);
+      return acc + Math.PI * (crownDiameterM / 2) ** 2;
+    }, 0);
+    const plotAreaM2 = Math.max(1, totalTrees * 16);
+    const canopyCoverPct = round(Math.max(0, Math.min(100, (canopyAreaM2 / plotAreaM2) * 100)), 2);
+
+    const hcvRaw =
+      entries.reduce((acc, entry) => {
+        if (entry.kesehatan === 'Sehat') return acc + 1;
+        if (entry.kesehatan === 'Merana') return acc + 0.5;
+        return acc;
+      }, 0) / Math.max(1, totalTrees);
+    const hcvHealthIndex = round(hcvRaw * 100, 2);
 
     const ndviAvg =
       photoMetrics.length > 0
@@ -433,16 +536,30 @@ export const AnalyticsPanel: React.FC<{ entries: PlantEntry[] }> = ({ entries })
 
     const hsvLatest = photoMetrics.length > 0 ? photoMetrics[photoMetrics.length - 1].hsv : null;
 
-    return {
-      report,
-      cciGrade,
+    const localSummary: CloudEcologySummary = {
+      totalTrees,
+      healthyTrees,
+      unhealthyTrees,
       totalBiomass,
       totalCarbon,
+      canopyCoverPct,
+      hcvHealthIndex,
+      totalVolumeM3,
+      avgHeightCm,
+      medianHeightCm,
+      tallestHeightCm,
+    };
+
+    const effectiveSummary = cloudSummary ?? localSummary;
+
+    return {
+      summary: effectiveSummary,
+      source: cloudSummary ? cloudSummarySource : 'local',
       ndviAvg,
       canopyAvg,
       hsvLatest,
     };
-  }, [treeRecords, areaHa, entries, photoMetrics]);
+  }, [entries, photoMetrics, cloudSummary, cloudSummarySource]);
 
   if (entries.length === 0) {
     return (
@@ -469,9 +586,9 @@ export const AnalyticsPanel: React.FC<{ entries: PlantEntry[] }> = ({ entries })
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 pb-24">
       <section className="space-y-4">
         <div className="flex items-center justify-between px-1">
-          <h4 className="text-[10px] font-black text-slate-800 uppercase tracking-widest">Ecology Intelligence</h4>
-          <span className="text-[8px] font-black text-emerald-700 bg-emerald-50 px-2 py-1 rounded-lg uppercase">
-            10 Modul Aktif
+          <h4 className="text-[10px] font-black text-slate-800 uppercase tracking-widest">Eco Summary Metrics</h4>
+          <span className={`text-[8px] font-black px-2 py-1 rounded-lg uppercase ${ecologySummary.source === 'cloud' ? 'text-sky-700 bg-sky-50' : 'text-amber-700 bg-amber-50'}`}>
+            {cloudSummaryLoading ? 'SYNC CLOUD...' : ecologySummary.source === 'cloud' ? 'SOURCE: CLOUD' : 'SOURCE: LOCAL'}
           </span>
         </div>
 
@@ -504,43 +621,59 @@ export const AnalyticsPanel: React.FC<{ entries: PlantEntry[] }> = ({ entries })
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="bg-gradient-to-br from-emerald-600 to-teal-600 text-white rounded-2xl p-4 shadow-lg">
+            <p className="text-[9px] font-black uppercase tracking-wider text-emerald-50">Estimasi Biomassa</p>
+            <p className="text-xl font-black mt-1">{ecologySummary.summary.totalBiomass}<span className="text-[10px] ml-1">kg</span></p>
+            <p className="text-[9px] font-bold text-emerald-100 mt-1">Pohon: {ecologySummary.summary.totalTrees}</p>
+          </div>
+
+          <div className="bg-gradient-to-br from-sky-600 to-blue-700 text-white rounded-2xl p-4 shadow-lg">
+            <p className="text-[9px] font-black uppercase tracking-wider text-sky-50">Estimasi Karbon</p>
+            <p className="text-xl font-black mt-1">{ecologySummary.summary.totalCarbon}<span className="text-[10px] ml-1">kg C</span></p>
+            <p className="text-[9px] font-bold text-sky-100 mt-1">Dari total biomassa</p>
+          </div>
+
           <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-sm">
-            <p className="text-[9px] font-black text-slate-400 uppercase">Density</p>
+            <p className="text-[9px] font-black text-slate-400 uppercase">Canopy Cover</p>
             <p className="text-lg font-black text-slate-800">
-              {ecologySummary.report.density}
-              <span className="text-[10px] text-slate-500 ml-1">pohon/ha</span>
+              {ecologySummary.summary.canopyCoverPct}<span className="text-[10px] ml-1 text-slate-500">%</span>
+            </p>
+            <p className="text-[9px] text-slate-500 font-bold">Estimasi tutupan tajuk dari tinggi</p>
+          </div>
+
+          <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-sm">
+            <p className="text-[9px] font-black text-slate-400 uppercase">HCV Health Index</p>
+            <p className="text-lg font-black text-slate-800">
+              {ecologySummary.summary.hcvHealthIndex}<span className="text-[10px] ml-1 text-slate-500">%</span>
             </p>
             <p className="text-[9px] text-slate-500 font-bold">
-              Sehat: {ecologySummary.report.healthyTrees} • Tidak sehat: {ecologySummary.report.unhealthyTrees}
+              Sehat: {ecologySummary.summary.healthyTrees} • Tidak sehat: {ecologySummary.summary.unhealthyTrees}
             </p>
           </div>
 
           <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-sm">
-            <p className="text-[9px] font-black text-slate-400 uppercase">CCI</p>
+            <p className="text-[9px] font-black text-slate-400 uppercase">Volume</p>
             <p className="text-lg font-black text-slate-800">
-              {ecologySummary.report.cci}
-              <span className="text-[10px] text-slate-500 ml-1">%</span>
+              {ecologySummary.summary.totalVolumeM3}<span className="text-[10px] ml-1 text-slate-500">m3</span>
             </p>
-            <p className="text-[9px] text-slate-500 font-bold">Grade: {ecologySummary.cciGrade}</p>
+            <p className="text-[9px] text-slate-500 font-bold">Akumulasi volume batang</p>
           </div>
 
           <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-sm">
-            <p className="text-[9px] font-black text-slate-400 uppercase">Tree Spacing</p>
+            <p className="text-[9px] font-black text-slate-400 uppercase">Rata-rata Tinggi</p>
             <p className="text-lg font-black text-slate-800">
-              {ecologySummary.report.spacingMean}
-              <span className="text-[10px] text-slate-500 ml-1">m</span>
+              {ecologySummary.summary.avgHeightCm}<span className="text-[10px] ml-1 text-slate-500">cm</span>
             </p>
-            <p className="text-[9px] text-slate-500 font-bold">Conformity: {ecologySummary.report.spacingConformity}%</p>
+            <p className="text-[9px] text-slate-500 font-bold">Median: {ecologySummary.summary.medianHeightCm} cm</p>
           </div>
 
           <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-sm">
-            <p className="text-[9px] font-black text-slate-400 uppercase">GPS Quality</p>
+            <p className="text-[9px] font-black text-slate-400 uppercase">Pohon Tertinggi</p>
             <p className="text-lg font-black text-slate-800">
-              {ecologySummary.report.gpsAccuracy}
-              <span className="text-[10px] text-slate-500 ml-1">m</span>
+              {ecologySummary.summary.tallestHeightCm}<span className="text-[10px] ml-1 text-slate-500">cm</span>
             </p>
-            <p className="text-[9px] text-slate-500 font-bold">Area estimasi: {round(areaHa, 2)} ha</p>
+            <p className="text-[9px] text-slate-500 font-bold">Distribusi tinggi terdeteksi</p>
           </div>
 
           <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-sm">
@@ -550,30 +683,12 @@ export const AnalyticsPanel: React.FC<{ entries: PlantEntry[] }> = ({ entries })
           </div>
 
           <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-sm">
-            <p className="text-[9px] font-black text-slate-400 uppercase">Canopy Cover</p>
+            <p className="text-[9px] font-black text-slate-400 uppercase">Canopy Kamera</p>
             <p className="text-lg font-black text-slate-800">
               {ecologySummary.canopyAvg}
               <span className="text-[10px] text-slate-500 ml-1">%</span>
             </p>
             <p className="text-[9px] text-slate-500 font-bold">{getCanopyLabel(ecologySummary.canopyAvg)}</p>
-          </div>
-
-          <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-sm">
-            <p className="text-[9px] font-black text-slate-400 uppercase">Estimasi Biomassa</p>
-            <p className="text-lg font-black text-slate-800">
-              {ecologySummary.totalBiomass}
-              <span className="text-[10px] text-slate-500 ml-1">kg</span>
-            </p>
-            <p className="text-[9px] text-slate-500 font-bold">Total pohon: {entries.length}</p>
-          </div>
-
-          <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-sm">
-            <p className="text-[9px] font-black text-slate-400 uppercase">Estimasi Karbon</p>
-            <p className="text-lg font-black text-slate-800">
-              {ecologySummary.totalCarbon}
-              <span className="text-[10px] text-slate-500 ml-1">kg C</span>
-            </p>
-            <p className="text-[9px] text-slate-500 font-bold">Dari total biomassa</p>
           </div>
         </div>
 

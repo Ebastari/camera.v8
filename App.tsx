@@ -34,6 +34,8 @@ const dataUrlToFile = async (dataUrl: string, fileName: string): Promise<File> =
 
 const GPS_ACCURACY_THRESHOLD_M = 20;
 const DESKTOP_GPS_ACCURACY_THRESHOLD_M = 60;
+const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw_B-b96eu94j562hLAYKTMLLe9XhTMDS5JhL_GoPzb5OGpDrQ2JHfaiPgXW4lUbMwV_Q/exec';
+const LEGACY_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxPDvlK5Xk2WgcEsbqZtUH-k69_Xj3oXU8ciOJP8Y3e0twb4O-T1rNwLWUUTsTt2tmu9A/exec';
 
 interface GridAnchor {
   lat: number;
@@ -170,9 +172,16 @@ const App: React.FC = () => {
 
   const [gps, setGps] = useState<GpsLocation | null>(null);
   const [appsScriptUrl, setAppsScriptUrl] = useLocalStorage<string>(
-    'appsScriptUrl', 
-    'https://script.google.com/macros/s/AKfycbzdPnQwKdNFZqfrFUm6lWGsbCosai8idMR50Ih5lv-9uX_N24v4lsFGBvy10_MaZHJz/exec'
+    'appsScriptUrl',
+    DEFAULT_APPS_SCRIPT_URL,
   );
+
+  useEffect(() => {
+    const current = String(appsScriptUrl || '').trim();
+    if (!current || current === LEGACY_APPS_SCRIPT_URL || current.includes('/s/.../exec')) {
+      setAppsScriptUrl(DEFAULT_APPS_SCRIPT_URL);
+    }
+  }, [appsScriptUrl, setAppsScriptUrl]);
 
   useEffect(() => {
     const sx = Number(formState.spacingX);

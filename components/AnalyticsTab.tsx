@@ -226,7 +226,7 @@ export const AnalyticsTab: React.FC<AnalyticsTabProps> = ({ entries, appsScriptU
         </div>
       )}
       
-      <AnalyticsPanel entries={mergedData} />
+      <AnalyticsPanel entries={mergedData} appsScriptUrl={appsScriptUrl} />
     </div>
   );
 };
