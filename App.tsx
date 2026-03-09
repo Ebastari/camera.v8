@@ -193,7 +193,7 @@ const App: React.FC = () => {
   const syncInProgressRef = useRef(false);
 
   const [formState, setFormState] = useLocalStorage<FormState>('formState', {
-    tinggi: 10,
+    tinggi: 30,
     tahunTanam: new Date().getFullYear(),
     jenis: 'Sengon',
     pekerjaan: '',
@@ -509,7 +509,7 @@ const App: React.FC = () => {
     };
   }, [isOnline, syncPendingEntries]);
 
-  const handleCapture = useCallback(async (dataUrl: string, aiHealth?: PlantHealthResult | null, thumbnailDataUrl?: string) => {
+  const handleCapture = useCallback(async (dataUrl: string, aiHealth?: PlantHealthResult | null, thumbnailDataUrl?: string, mode?: 'manual' | 'ai') => {
     const timestamp = new Date();
     const pad = (n: number, len: number = 2) => n.toString().padStart(len, '0');
     const id = `${timestamp.getFullYear()}${pad(timestamp.getMonth() + 1)}${pad(timestamp.getDate())}-${pad(timestamp.getHours())}${pad(timestamp.getMinutes())}${pad(timestamp.getSeconds())}${pad(timestamp.getMilliseconds(), 3)}`;
@@ -558,6 +558,11 @@ const App: React.FC = () => {
     const hcvInput = toHcvInputFromAI(aiHealth)
       ?? (mapHealthToHcvWeight(kesehatanFinal as 'Sehat' | 'Merana' | 'Mati') * 50);
 
+    // Deteksi mode: jika AI height mode aktif, mode = 'ai', jika tidak, 'manual'
+    // (Jika ingin lebih spesifik, bisa tambahkan prop dari CameraView, di sini asumsikan AI height mode = false berarti manual)
+    // Untuk sekarang, default ke 'manual' (bisa diubah jika CameraView mengirimkan info mode)
+
+
     const newEntryMeta: Omit<PlantEntry, 'foto'> = {
       id,
       tanggal: timestamp.toLocaleString('id-ID'),
@@ -593,6 +598,7 @@ const App: React.FC = () => {
       aiConfidence: Number.isFinite(aiConfidence) ? aiConfidence : undefined,
       aiDeskripsi: aiHealth ? generateHealthDescription(aiHealth) : undefined,
       hcvInput,
+      mode,
     };
 
     try {
@@ -722,6 +728,9 @@ const App: React.FC = () => {
       showToast('Database dibersihkan.', 'success');
     }
   };
+
+  // Hitung jumlah terkirim
+  const sentEntriesCount = totalEntriesCount - pendingEntriesCount;
 
   return (
     <div className="w-screen h-[100dvh] min-h-[100dvh] overflow-hidden bg-black text-slate-800">

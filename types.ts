@@ -6,6 +6,10 @@ export interface GpsLocation {
 }
 
 export interface PlantEntry {
+    /**
+     * Mode pengambilan data: 'manual' untuk sampel manual, 'ai' untuk otomatis
+     */
+    mode?: 'manual' | 'ai';
   id: string;
   tanggal: string;
   timestamp: string;

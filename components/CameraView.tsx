@@ -1,12 +1,107 @@
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+// ...existing code...
 import { getCameraDevices, startCamera } from '../services/cameraService';
 import { GpsLocation, FormState } from '../types';
 import { Compass } from './Compass';
+import { LiveHealthComment } from './LiveHealthComment';
 import { analyzePlantHealthHSV, type PlantHealthResult } from '../ecology/plantHealth';
+import { detectPlantHeightOpenCV, loadOpenCV } from '../ecology/plantDetection';
+
+interface HeightAiEstimate {
+  cm: number;
+  confidence: number;
+}
+
+interface HeightAiRange {
+  min: number;
+  max: number;
+}
+
+const HEIGHT_MIN_CM = 30;
+const HEIGHT_MAX_CM = 500;
+
+const HEIGHT_AI_NOTICE_DISMISSED_KEY = 'camera-montana-height-ai-notice-dismissed-v1';
+const HEIGHT_AI_CALIBRATION_SAMPLES_KEY = 'camera-montana-height-ai-calibration-samples-v1';
+const HEIGHT_AI_RANGE_KEY = 'camera-montana-height-ai-range-v1';
+
+const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+
+const round = (value: number): number => Math.round(value);
+
+const median = (values: number[]): number => {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+};
+
+const stdDev = (values: number[]): number => {
+  if (values.length <= 1) return 0;
+  const mean = values.reduce((acc, v) => acc + v, 0) / values.length;
+  const variance = values.reduce((acc, v) => acc + (v - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+};
+
+const safeParseJson = <T,>(raw: string | null, fallback: T): T => {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+};
+
+const deriveRangeFromSamples = (samples: number[]): HeightAiRange | null => {
+  if (samples.length < 10) {
+    return null;
+  }
+
+  const cleaned = samples
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v) && v >= HEIGHT_MIN_CM && v <= HEIGHT_MAX_CM)
+    .sort((a, b) => a - b);
+
+  if (cleaned.length < 10) {
+    return null;
+  }
+
+  // Gunakan nilai persentil sederhana (abaikan outlier ekstrem pertama/terakhir).
+  const min = Math.max(HEIGHT_MIN_CM, round(cleaned[1]));
+  const max = Math.min(HEIGHT_MAX_CM, round(cleaned[cleaned.length - 2]));
+
+  if (max <= min) {
+    return null;
+  }
+
+  return { min, max };
+};
+
+const toHSV = (r: number, g: number, b: number): { h: number; s: number; v: number } => {
+  const nr = r / 255;
+  const ng = g / 255;
+  const nb = b / 255;
+
+  const max = Math.max(nr, ng, nb);
+  const min = Math.min(nr, ng, nb);
+  const delta = max - min;
+
+  let h = 0;
+  if (delta !== 0) {
+    if (max === nr) h = 60 * (((ng - nb) / delta) % 6);
+    else if (max === ng) h = 60 * ((nb - nr) / delta + 2);
+    else h = 60 * ((nr - ng) / delta + 4);
+  }
+  if (h < 0) h += 360;
+
+  const s = max === 0 ? 0 : delta / max;
+  const v = max;
+  return { h, s, v };
+};
+
 
 interface CameraViewProps {
-  onCapture: (dataUrl: string, aiHealth?: PlantHealthResult | null, thumbnailDataUrl?: string) => void;
+  onCapture: (dataUrl: string, aiHealth?: PlantHealthResult | null, thumbnailDataUrl?: string, mode?: 'manual' | 'ai') => void;
   formState: FormState;
   onFormStateChange: React.Dispatch<React.SetStateAction<FormState>>;
   entriesCount: number;
@@ -95,17 +190,80 @@ export const CameraView: React.FC<CameraViewProps> = ({
   onSetGridAnchor,
   onClearGridAnchor,
 }) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const analysisCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const shutterSoundRef = useRef<HTMLAudioElement>(null);
-
+  // Semua deklarasi state harus di sini, sebelum useEffect
+  const [showGridOverlay, setShowGridOverlay] = useState(false);
+  // State untuk mode AI harus dideklarasikan sebelum isManualHeightMode
+  const [isHeightAiMode, setIsHeightAiMode] = useState(false);
+  // Mode pengambilan titik manual aktif jika mode AI nonaktif
+  const isManualHeightMode = !isHeightAiMode;
+  const [sampleIndicator, setSampleIndicator] = useState<number | null>(null);
+  const [calibrationActive, setCalibrationActive] = useState(false);
+  const [showCalibrationHint, setShowCalibrationHint] = useState(false);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [currentDeviceId, setCurrentDeviceId] = useState<string | undefined>(undefined);
   const [cameraLoading, setCameraLoading] = useState(true);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [needsUserAction, setNeedsUserAction] = useState(false);
+  const [showGridPanel, setShowGridPanel] = useState(false);
   const [livePlantHealth, setLivePlantHealth] = useState<PlantHealthResult | null>(null);
+  const [showHeightAiNotice, setShowHeightAiNotice] = useState(false);
+  const [showHeightAiPopup, setShowHeightAiPopup] = useState(false);
+  const [heightAiEstimate, setHeightAiEstimate] = useState<HeightAiEstimate | null>(null);
+  const [heightAiSamples, setHeightAiSamples] = useState<number[]>(() => {
+    try {
+      const parsed = safeParseJson<number[]>(window.localStorage.getItem(HEIGHT_AI_CALIBRATION_SAMPLES_KEY), []);
+      return Array.isArray(parsed) ? parsed.filter((v) => Number.isFinite(v)) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [heightAiRange, setHeightAiRange] = useState<HeightAiRange | null>(() => {
+    try {
+      const parsed = safeParseJson<HeightAiRange | null>(window.localStorage.getItem(HEIGHT_AI_RANGE_KEY), null);
+      if (!parsed || !Number.isFinite(parsed.min) || !Number.isFinite(parsed.max)) {
+        return null;
+      }
+      return parsed.max > parsed.min ? parsed : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // Proses kalibrasi dimulai saat mode AI diaktifkan
+  useEffect(() => {
+    if (isHeightAiMode && heightAiSamples.length < 10) {
+      setCalibrationActive(true);
+      setShowCalibrationHint(true);
+      // Petunjuk muncul 2.5 detik
+      setTimeout(() => setShowCalibrationHint(false), 2500);
+    } else {
+      setCalibrationActive(false);
+      setShowCalibrationHint(false);
+    }
+    setShowGridOverlay(isHeightAiMode && heightAiSamples.length >= 10);
+  }, [isHeightAiMode, heightAiSamples.length]);
+
+  // Fungsi untuk trigger penanda angka besar setiap kali sampel diambil
+  const triggerSampleIndicator = useCallback((sampleNum: number) => {
+    setSampleIndicator(sampleNum);
+    setTimeout(() => setSampleIndicator(null), 1500); // 1.5 detik
+  }, []);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const analysisCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const shutterSoundRef = useRef<HTMLAudioElement>(null);
+  const [heightAiNoticeDismissed, setHeightAiNoticeDismissed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(HEIGHT_AI_NOTICE_DISMISSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const hasShownHeightAiNoticeRef = useRef(false);
+  const hasAutoEnabledHeightAiRef = useRef(false);
+  const heightAiNoticeTimerRef = useRef<number | null>(null);
+  const heightAiBufferRef = useRef<number[]>([]);
+  const lastHeightSyncRef = useRef(0);
   const canSetAnchor = Boolean(
     gps &&
     Number.isFinite(gps.lat) &&
@@ -122,6 +280,12 @@ export const CameraView: React.FC<CameraViewProps> = ({
       stream.getTracks().forEach(track => track.stop());
       videoRef.current.srcObject = null;
     }
+    // Reset analysis canvas as well
+    if (analysisCanvasRef.current) {
+      analysisCanvasRef.current.width = 0;
+      analysisCanvasRef.current.height = 0;
+      analysisCanvasRef.current = null;
+    }
   }, []);
 
   const initializeCamera = useCallback(async (deviceId?: string) => {
@@ -133,8 +297,36 @@ export const CameraView: React.FC<CameraViewProps> = ({
     try {
       const stream = await startCamera(deviceId);
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+        // Wait for video element to be ready
+        if (!videoRef.current.srcObject) {
+          videoRef.current.srcObject = stream;
+        }
         
+        // Ensure video metadata is loaded before playing
+        if (videoRef.current.readyState < 2) {
+          await new Promise<void>((resolve) => {
+            const onLoadedMetadata = () => {
+              videoRef.current?.removeEventListener('loadedmetadata', onLoadedMetadata);
+              videoRef.current?.removeEventListener('error', onError);
+              resolve();
+            };
+            const onError = () => {
+              videoRef.current?.removeEventListener('loadedmetadata', onLoadedMetadata);
+              videoRef.current?.removeEventListener('error', onError);
+              resolve();
+            };
+            videoRef.current?.addEventListener('loadedmetadata', onLoadedMetadata);
+            videoRef.current?.addEventListener('error', onError);
+            
+            // Timeout after 5 seconds
+            setTimeout(() => {
+              videoRef.current?.removeEventListener('loadedmetadata', onLoadedMetadata);
+              videoRef.current?.removeEventListener('error', onError);
+              resolve(); // Resolve anyway to try play
+            }, 5000);
+          });
+        }
+
         try {
           await videoRef.current.play();
           setCameraLoading(false);
@@ -146,7 +338,16 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
         const currentTrack = stream.getVideoTracks()[0];
         if (currentTrack) {
-          setCurrentDeviceId(currentTrack.getSettings().deviceId);
+          const settings = currentTrack.getSettings();
+          setCurrentDeviceId(settings.deviceId);
+          
+          // Log camera info for debugging
+          console.log('Camera started:', {
+            label: currentTrack.label,
+            width: settings.width,
+            height: settings.height,
+            facingMode: settings.facingMode
+          });
         }
       }
     } catch (err: any) {
@@ -156,6 +357,38 @@ export const CameraView: React.FC<CameraViewProps> = ({
       showToast('Gagal mengakses kamera.', 'error');
     }
   }, [stopCurrentStream, showToast]);
+
+  // Handle visibility change - restart camera if tab becomes visible again
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        // Reinitialize camera when tab becomes visible
+        const startup = async () => {
+          try {
+            const videoDevices = await getCameraDevices();
+            setDevices(videoDevices);
+            const backCamera = videoDevices.find(d => /back|rear|environment/i.test(d.label));
+            await initializeCamera(backCamera?.deviceId || videoDevices[0]?.deviceId);
+          } catch (e) {
+            console.log('Camera reinit on visibility change failed:', e);
+          }
+        };
+        
+        // Only reinitialize if camera is not currently loading/active
+        if (cameraLoading || !videoRef.current?.srcObject) {
+          startup();
+        }
+      } else {
+        // Stop camera when tab becomes hidden to save resources
+        stopCurrentStream();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [cameraLoading, stopCurrentStream, initializeCamera]);
 
   useEffect(() => {
     const startup = async () => {
@@ -196,6 +429,83 @@ export const CameraView: React.FC<CameraViewProps> = ({
       initializeCamera(nextDevice.deviceId);
     }
   }, [devices, currentDeviceId, initializeCamera, showToast]);
+
+  const triggerHeightAiNotice = useCallback(() => {
+    if (heightAiNoticeDismissed || hasShownHeightAiNoticeRef.current) {
+      return;
+    }
+
+    hasShownHeightAiNoticeRef.current = true;
+    setShowHeightAiNotice(true);
+    setShowHeightAiPopup(true);
+    if (heightAiNoticeTimerRef.current !== null) {
+      window.clearTimeout(heightAiNoticeTimerRef.current);
+    }
+    heightAiNoticeTimerRef.current = window.setTimeout(() => {
+      setShowHeightAiNotice(false);
+      heightAiNoticeTimerRef.current = null;
+    }, 2000);
+  }, [heightAiNoticeDismissed]);
+
+  const dismissHeightAiNotice = useCallback(() => {
+    setShowHeightAiNotice(false);
+    setHeightAiNoticeDismissed(true);
+    setShowHeightAiPopup(false);
+    try {
+      window.localStorage.setItem(HEIGHT_AI_NOTICE_DISMISSED_KEY, '1');
+    } catch {
+      // Ignore storage write failures silently.
+    }
+  }, []);
+
+  const openHeightAiPopup = useCallback(() => {
+    setShowHeightAiPopup(true);
+  }, []);
+
+  const closeHeightAiPopup = useCallback(() => {
+    setShowHeightAiPopup(false);
+  }, []);
+
+  // Tidak perlu tombol addHeightAiSample, proses di handleCaptureClick
+
+  const resetHeightAiCalibration = useCallback(() => {
+    setHeightAiSamples([]);
+    setHeightAiRange(null);
+    showToast('Kalibrasi Tinggi AI direset.', 'info');
+  }, [showToast]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(HEIGHT_AI_CALIBRATION_SAMPLES_KEY, JSON.stringify(heightAiSamples));
+    } catch {
+      // Ignore storage write failures silently.
+    }
+  }, [heightAiSamples]);
+
+  useEffect(() => {
+    try {
+      if (!heightAiRange) {
+        window.localStorage.removeItem(HEIGHT_AI_RANGE_KEY);
+      } else {
+        window.localStorage.setItem(HEIGHT_AI_RANGE_KEY, JSON.stringify(heightAiRange));
+      }
+    } catch {
+      // Ignore storage write failures silently.
+    }
+  }, [heightAiRange]);
+
+  const handleToggleHeightAiMode = useCallback(() => {
+    setIsHeightAiMode((prev) => {
+      const next = !prev;
+      showToast(next ? 'Mode Tinggi AI aktif.' : 'Mode Tinggi AI nonaktif.', 'info');
+      if (!next) {
+        setHeightAiEstimate(null);
+        heightAiBufferRef.current = [];
+      }
+      return next;
+    });
+    triggerHeightAiNotice();
+  }, [triggerHeightAiNotice, showToast]);
 
   const handleCaptureClick = useCallback(() => {
     const video = videoRef.current;
@@ -266,7 +576,28 @@ export const CameraView: React.FC<CameraViewProps> = ({
     thumbnailCanvas.height = 0;
 
     // Kirim data JPEG kualitas tinggi
-    onCapture(canvas.toDataURL('image/jpeg', 0.85), livePlantHealth, thumbnailDataUrl);
+    // Jika sedang kalibrasi AI (mode AI aktif, <10 sampel), simpan tinggi manual sebagai sampel
+    if (isHeightAiMode && calibrationActive && heightAiSamples.length < 10) {
+      const sample = clamp(round(formState.tinggi), HEIGHT_MIN_CM, HEIGHT_MAX_CM);
+      setHeightAiSamples((prev) => {
+        const next = [...prev, sample].slice(-10);
+        const sampleNumber = Math.min(10, next.length);
+        showToast(`Sampel ${sampleNumber} tersimpan`, 'info');
+        triggerSampleIndicator(sampleNumber);
+        // Jika sudah 10, kunci rentang AI
+        if (next.length === 10) {
+          const derived = deriveRangeFromSamples(next);
+          if (derived) {
+            setHeightAiRange(derived);
+            setIsHeightAiMode(true);
+            showToast(`Rentang AI dikunci: ${derived.min}-${derived.max} cm`, 'success');
+            showToast('Selamat, Anda sedang di mode AI.', 'success');
+          }
+        }
+        return next;
+      });
+    }
+    onCapture(canvas.toDataURL('image/jpeg', 0.85), livePlantHealth, thumbnailDataUrl, isHeightAiMode ? 'ai' : 'manual');
   }, [onCapture, formState, gps, entriesCount, showToast, livePlantHealth]);
 
   useEffect(() => {
@@ -308,6 +639,49 @@ export const CameraView: React.FC<CameraViewProps> = ({
         const imageData = context.getImageData(0, 0, ANALYSIS_SIZE, ANALYSIS_SIZE);
         const result = analyzePlantHealthHSV(imageData, { centerFocus: true });
         setLivePlantHealth(result);
+
+        if (isHeightAiMode) {
+          // Reset estimasi sebelum proses baru agar UI tidak stuck
+          setHeightAiEstimate(null);
+          (async () => {
+            try {
+              // Pastikan OpenCV.js sudah dimuat
+              // @ts-ignore
+              if (!(window as any).cv || !(window as any).cv.Mat) {
+                await loadOpenCV();
+              }
+              // Buat canvas sementara dari imageData
+              const tempCanvas = document.createElement('canvas');
+              tempCanvas.width = imageData.width;
+              tempCanvas.height = imageData.height;
+              const tempCtx = tempCanvas.getContext('2d');
+              if (tempCtx) tempCtx.putImageData(imageData, 0, 0);
+              const result = await detectPlantHeightOpenCV(tempCanvas);
+              const cm = result.plantHeightCm;
+              // Jika tidak terdeteksi (tinggi 0), set confidence rendah
+              const displayEstimate: HeightAiEstimate = {
+                cm: Math.round(cm),
+                confidence: cm > 0 ? 90 : 0,
+              };
+              setHeightAiEstimate(displayEstimate);
+              // Sinkron ke slider jika beda jauh
+              const now = Date.now();
+              const delta = Math.abs(formState.tinggi - cm);
+              if (cm > 0 && delta >= 6 && now - lastHeightSyncRef.current >= 2500) {
+                lastHeightSyncRef.current = now;
+                onFormStateChange((prev) => ({ ...prev, tinggi: Math.round(cm) }));
+              }
+            } catch (err) {
+              // Jika error pipeline, set estimasi gagal agar UI tidak stuck
+              setHeightAiEstimate({ cm: 0, confidence: 0 });
+              // Log error minimal
+              if (process.env.NODE_ENV !== 'production') {
+                // eslint-disable-next-line no-console
+                console.error('AI Height detection error:', err);
+              }
+            }
+          })();
+        }
       } catch {
         // Abaikan frame error sesaat saat stream berubah.
       }
@@ -327,10 +701,61 @@ export const CameraView: React.FC<CameraViewProps> = ({
         analysisCanvasRef.current = null;
       }
     };
-  }, [cameraLoading, cameraError, needsUserAction, currentDeviceId]);
+  }, [cameraLoading, cameraError, needsUserAction, currentDeviceId, isHeightAiMode, formState.tinggi, onFormStateChange, heightAiRange]);
+
+  useEffect(() => {
+    if (!livePlantHealth || hasAutoEnabledHeightAiRef.current) {
+      return;
+    }
+
+    // Aktifkan mode Tinggi AI otomatis saat analisis live pertama kali tersedia.
+    hasAutoEnabledHeightAiRef.current = true;
+    setIsHeightAiMode(true);
+    triggerHeightAiNotice();
+  }, [livePlantHealth, triggerHeightAiNotice]);
+
+  useEffect(() => {
+    return () => {
+      if (heightAiNoticeTimerRef.current !== null) {
+        window.clearTimeout(heightAiNoticeTimerRef.current);
+      }
+    };
+  }, []);
 
   return (
     <div className="relative w-screen h-[100dvh] min-h-[100dvh] bg-black overflow-hidden flex items-center justify-center">
+      {/* GRID OVERLAY 6x6, tipis & transparan, hanya muncul setelah 10 sampel manual */}
+      {showGridOverlay && (
+        <div className="pointer-events-none absolute inset-0 z-20">
+          <svg width="100%" height="100%" viewBox="0 0 100 100" className="w-full h-full" style={{position:'absolute',top:0,left:0}}>
+            {/* Garis vertikal */}
+            {[1,2,3,4,5].map(i => (
+              <line key={i} x1={(i*100/6).toFixed(2)} y1="0" x2={(i*100/6).toFixed(2)} y2="100" stroke="white" strokeWidth="0.5" opacity="0.25" />
+            ))}
+            {/* Garis horizontal */}
+            {[1,2,3,4,5].map(i => (
+              <line key={i} y1={(i*100/6).toFixed(2)} x1="0" y2={(i*100/6).toFixed(2)} x2="100" stroke="white" strokeWidth="0.5" opacity="0.25" />
+            ))}
+          </svg>
+        </div>
+      )}
+
+      {/* PETUNJUK KALIBRASI, muncul saat mulai mode AI */}
+      {showCalibrationHint && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
+          <div className="text-white text-2xl sm:text-4xl font-black drop-shadow-lg bg-black/60 rounded-2xl px-8 py-4 animate-fade-in-out text-center">
+            Geser slider tinggi manual, lalu klik foto untuk menyimpan sampel
+          </div>
+        </div>
+      )}
+      {/* PENANDA ANGKA BESAR, muncul 1-2 detik setiap kali sampel diambil */}
+      {sampleIndicator && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
+          <div className="text-white text-[7rem] font-black drop-shadow-lg bg-black/30 rounded-2xl px-10 py-2 animate-fade-in-out">
+            {sampleIndicator}
+          </div>
+        </div>
+      )}
       <video 
         ref={videoRef} 
         autoPlay 
@@ -397,66 +822,100 @@ export const CameraView: React.FC<CameraViewProps> = ({
         <div className="flex flex-col items-end gap-2 pointer-events-auto max-w-[220px]">
           <div className="w-full bg-black/15 backdrop-blur-sm px-3 py-2 rounded-2xl border border-white/5 shadow-md">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[8px] font-black text-white/60 uppercase tracking-widest">Progress</span>
-              <span className="text-[10px] font-bold text-white">{entriesCount}/{DAILY_TARGET}</span>
-            </div>
-            <div className="w-full h-1 bg-white/10 rounded-full mt-1 overflow-hidden">
-              <div className="h-full bg-blue-500 transition-all duration-700" style={{ width: `${progressPercentage}%` }} />
+              <span className="text-[8px] font-black text-white/60 uppercase tracking-widest">Panel Kamera</span>
+              <button
+                onClick={() => setShowGridPanel((prev) => !prev)}
+                className="w-5 h-5 rounded-md bg-white/10 text-white/90 text-[10px] font-black border border-white/20 flex items-center justify-center"
+                title={showGridPanel ? 'Sembunyikan panel' : 'Munculkan panel'}
+              >
+                {showGridPanel ? '-' : '+'}
+              </button>
             </div>
 
-            <div className="mt-2 flex items-center justify-between">
-              <span className={`text-[8px] font-black uppercase tracking-widest ${isSyncing ? 'text-blue-300' : isOnline ? 'text-emerald-300' : 'text-amber-300'}`}>
-                {isSyncing ? 'SYNCING' : isOnline ? 'ONLINE' : 'OFFLINE'}
-              </span>
-              <span className="text-[8px] text-white/60 font-bold">Pending {pendingCount}</span>
-            </div>
-            <p className="mt-0.5 text-[7px] text-white/45 font-bold">
-              Last sync {lastSyncAt ? new Date(lastSyncAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '--:--'}
-            </p>
-
-            <div className="mt-2 pt-2 border-t border-white/10">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[8px] font-black text-white/70 uppercase tracking-widest">Grid {formState.spacingX}x{formState.spacingY}</span>
-                <span className={`text-[8px] font-black uppercase tracking-widest ${gridAnchor ? 'text-emerald-200' : 'text-amber-200'}`}>
-                  {gridAnchor ? 'AKTIF' : 'MANUAL GPS'}
-                </span>
+            {!showGridPanel && (
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <span className="text-[9px] font-black text-white">{entriesCount}/{DAILY_TARGET}</span>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1">
+                    <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-400' : 'bg-red-500'}`} />
+                    <span className="text-[7px] font-black text-white/80 uppercase">{isOnline ? 'Online' : 'Offline'}</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        gps && Number.isFinite(gps.accuracy) && gps.accuracy > 10 ? 'bg-black border border-white/40' : 'bg-emerald-400'
+                      }`}
+                    />
+                    <span className="text-[7px] font-black text-white/80 uppercase">
+                      {gps && Number.isFinite(gps.accuracy) && gps.accuracy > 10 ? 'Akurasi Rendah' : 'Akurasi OK'}
+                    </span>
+                  </div>
+                </div>
               </div>
+            )}
 
-              <p className="mt-1 text-[8px] text-white/75 font-bold truncate">
-                KOORDINAT ASLI {gps ? `${gps.lat.toFixed(6)}, ${gps.lon.toFixed(6)}` : '--'}
-              </p>
-              <p className="mt-0.5 text-[8px] text-emerald-200 font-bold truncate">
-                KOORDINAT REVISI {effectiveCoordinate ? `${effectiveCoordinate.lat.toFixed(6)}, ${effectiveCoordinate.lon.toFixed(6)}` : '--'}
-              </p>
+            {showGridPanel && (
+              <>
+                <div className="w-full h-1 bg-white/10 rounded-full mt-2 overflow-hidden">
+                  <div className="h-full bg-blue-500 transition-all duration-700" style={{ width: `${progressPercentage}%` }} />
+                </div>
 
-              {gridAnchor && (
-                <p className="mt-0.5 text-[8px] text-amber-200 font-bold">
-                  Step {effectiveCoordinate ? `${effectiveCoordinate.stepX}, ${effectiveCoordinate.stepY}` : '--'} | Dist {distanceFromAnchorM !== null ? `${distanceFromAnchorM.toFixed(2)}m` : '--'}
+                <div className="mt-2 flex items-center justify-between">
+                  <span className={`text-[8px] font-black uppercase tracking-widest ${isSyncing ? 'text-blue-300' : isOnline ? 'text-emerald-300' : 'text-amber-300'}`}>
+                    {isSyncing ? 'SYNCING' : isOnline ? 'ONLINE' : 'OFFLINE'}
+                  </span>
+                  <span className="text-[8px] text-white/60 font-bold">Pending {pendingCount}</span>
+                </div>
+                <p className="mt-0.5 text-[7px] text-white/45 font-bold">
+                  Last sync {lastSyncAt ? new Date(lastSyncAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '--:--'}
                 </p>
-              )}
-              <p className="mt-0.5 text-[7px] text-white/45">
-                Atas: koordinat asli, bawah: koordinat revisi grid 4x4.
-              </p>
 
-              <div className="mt-2 grid grid-cols-2 gap-1.5">
-                <button
-                  onClick={onSetGridAnchor}
-                  disabled={!canSetAnchor}
-                  className="px-2 py-1 rounded-lg bg-blue-500/70 disabled:bg-blue-500/25 text-white text-[8px] font-black uppercase tracking-widest border border-blue-300/30"
-                >
-                  Set Awal
-                </button>
-                <button
-                  onClick={onClearGridAnchor}
-                  className="px-2 py-1 rounded-lg bg-white/10 text-white/90 text-[8px] font-black uppercase tracking-widest border border-white/20"
-                >
-                  Reset
-                </button>
-              </div>
-            </div>
+                <div className="mt-2 pt-2 border-t border-white/10">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[8px] font-black text-white/70 uppercase tracking-widest">Grid {formState.spacingX}x{formState.spacingY}</span>
+                    <span className={`text-[8px] font-black uppercase tracking-widest ${gridAnchor ? 'text-emerald-200' : 'text-amber-200'}`}>
+                      {gridAnchor ? 'AKTIF' : 'MANUAL GPS'}
+                    </span>
+                  </div>
+
+                  <p className="mt-1 text-[8px] text-white/75 font-bold truncate">
+                    KOORDINAT ASLI {gps ? `${gps.lat.toFixed(6)}, ${gps.lon.toFixed(6)}` : '--'}
+                  </p>
+                  <p className="mt-0.5 text-[8px] text-emerald-200 font-bold truncate">
+                    KOORDINAT REVISI {effectiveCoordinate ? `${effectiveCoordinate.lat.toFixed(6)}, ${effectiveCoordinate.lon.toFixed(6)}` : '--'}
+                  </p>
+
+                  {gridAnchor && (
+                    <p className="mt-0.5 text-[8px] text-amber-200 font-bold">
+                      Step {effectiveCoordinate ? `${effectiveCoordinate.stepX}, ${effectiveCoordinate.stepY}` : '--'} | Dist {distanceFromAnchorM !== null ? `${distanceFromAnchorM.toFixed(2)}m` : '--'}
+                    </p>
+                  )}
+                  <p className="mt-0.5 text-[7px] text-white/45">
+                    Atas: koordinat asli, bawah: koordinat revisi grid 4x4.
+                  </p>
+
+                  <div className="mt-2 grid grid-cols-2 gap-1.5">
+                    <button
+                      onClick={onSetGridAnchor}
+                      disabled={!canSetAnchor}
+                      className="px-2 py-1 rounded-lg bg-blue-500/70 disabled:bg-blue-500/25 text-white text-[8px] font-black uppercase tracking-widest border border-blue-300/30"
+                    >
+                      Set Awal
+                    </button>
+                    <button
+                      onClick={onClearGridAnchor}
+                      className="px-2 py-1 rounded-lg bg-white/10 text-white/90 text-[8px] font-black uppercase tracking-widest border border-white/20"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
 
           <div className="flex items-center gap-1.5 flex-wrap justify-end">
+
             {!gps && (
               <div className="bg-red-500/10 backdrop-blur-sm px-2 py-1 rounded-lg border border-red-500/15 flex items-center gap-2 animate-pulse">
                 <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
@@ -499,6 +958,13 @@ export const CameraView: React.FC<CameraViewProps> = ({
                 <span className="text-[7px] font-bold text-white/70">{livePlantHealth.confidence}%</span>
               </div>
             )}
+
+            {isHeightAiMode && (
+              <div className="bg-black/15 backdrop-blur-sm px-2 py-1 rounded-lg border border-cyan-300/20 flex items-center gap-2">
+                <span className="text-[7px] font-black text-cyan-200 uppercase tracking-widest">Tinggi AI</span>
+                <span className="text-[7px] font-bold text-white/65">Aktif</span>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -508,29 +974,74 @@ export const CameraView: React.FC<CameraViewProps> = ({
       <div className="absolute bottom-0 left-0 right-0 z-40 safe-bottom">
         <div className="mx-3 sm:mx-4 mb-3 sm:mb-6 space-y-3 sm:space-y-4">
           
-          <div className="bg-black/35 backdrop-blur-2xl rounded-[2rem] sm:rounded-[2.5rem] border border-white/10 p-4 sm:p-5 flex flex-col gap-3 sm:gap-4 shadow-2xl">
-            <div className="flex justify-between items-center px-2">
+          <div className="mx-auto w-full max-w-[560px] bg-black/14 backdrop-blur-md rounded-[1.1rem] sm:rounded-[1.25rem] border border-white/5 p-2 sm:p-2.5 flex flex-col gap-2 shadow-[0_6px_16px_rgba(0,0,0,0.12)]">
+            <div className="flex justify-between items-center px-1.5">
               <div className="flex items-center gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                <span className="text-[10px] font-black text-white uppercase tracking-widest">Pengaturan Tinggi</span>
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                <span className="text-[9px] font-black text-white uppercase tracking-wider">
+                  {isHeightAiMode ? 'Tinggi AI Aktif' : 'Pengaturan Tinggi'}
+                </span>
               </div>
-              <span className="text-xs sm:text-sm font-black text-white bg-blue-600 px-3 sm:px-4 py-1.5 rounded-2xl shadow-[0_0_15px_rgba(37,99,235,0.4)] border border-blue-400/30">
+              <span className="text-[10px] sm:text-xs font-black text-white bg-emerald-500/65 px-2.5 sm:px-3 py-1 rounded-xl border border-emerald-300/20">
                 {formState.tinggi} cm
               </span>
             </div>
             
-            <div className="relative px-2 py-4">
+            <div className="relative px-1.5 py-1.5">
               <input 
-                type="range" min="5" max="1500" value={formState.tinggi} 
+                type="range" min={HEIGHT_MIN_CM} max={HEIGHT_MAX_CM} value={formState.tinggi} 
                 onChange={e => onFormStateChange(prev => ({ ...prev, tinggi: parseInt(e.target.value) }))}
-                className="w-full h-3.5 sm:h-4 bg-blue-600/30 rounded-full appearance-none cursor-pointer outline-none
+                className="w-full h-3.5 sm:h-4 bg-emerald-600/20 rounded-full appearance-none cursor-pointer outline-none
                   [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-8 [&::-webkit-slider-thumb]:h-8 sm:[&::-webkit-slider-thumb]:w-10 sm:[&::-webkit-slider-thumb]:h-10 
                   [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white 
-                  [&::-webkit-slider-thumb]:shadow-[0_0_25px_rgba(255,255,255,0.9),0_0_10px_rgba(0,0,0,0.2)] 
-                  [&::-webkit-slider-thumb]:border-4 [&::-webkit-slider-thumb]:border-blue-500
-                  [&::-moz-range-thumb]:w-8 [&::-moz-range-thumb]:h-8 sm:[&::-moz-range-thumb]:w-10 sm:[&::-moz-range-thumb]:h-10 [&::-moz-range-thumb]:border-4 [&::-moz-range-thumb]:border-blue-500
+                  [&::-webkit-slider-thumb]:shadow-[0_0_16px_rgba(255,255,255,0.7),0_0_8px_rgba(0,0,0,0.18)] 
+                  [&::-webkit-slider-thumb]:border-4 [&::-webkit-slider-thumb]:border-emerald-500
+                  [&::-moz-range-thumb]:w-8 [&::-moz-range-thumb]:h-8 sm:[&::-moz-range-thumb]:w-10 sm:[&::-moz-range-thumb]:h-10 [&::-moz-range-thumb]:border-4 [&::-moz-range-thumb]:border-emerald-500
                   [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-white" 
               />
+
+              <div className="mt-1.5 flex items-center justify-between gap-1.5">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={handleToggleHeightAiMode}
+                    className={`px-2 py-1 rounded-md border text-[7px] font-black uppercase tracking-wide active:scale-95 transition-all ${
+                      isHeightAiMode
+                        ? 'bg-cyan-500/20 border-cyan-300/35 text-cyan-100'
+                        : 'bg-black/20 border-white/15 text-white/80'
+                    }`}
+                    aria-pressed={isHeightAiMode}
+                    title="Toggle mode Tinggi AI"
+                  >
+                    AI Tinggi {isHeightAiMode ? 'ON' : 'OFF'}
+                  </button>
+
+                  <button
+                    onClick={openHeightAiPopup}
+                    className="px-2 py-1 rounded-md border border-white/15 bg-black/20 text-white/80 text-[7px] font-black uppercase tracking-wide active:scale-95 transition-all"
+                    title="Buka popup kalibrasi Tinggi AI"
+                  >
+                    Panduan
+                  </button>
+                </div>
+
+                {isHeightAiMode && (
+                  <span className="text-[7px] font-black text-cyan-100 uppercase tracking-wide">
+                    {heightAiEstimate ? `Estimasi ${heightAiEstimate.cm}cm (${heightAiEstimate.confidence}%)` : 'Mengukur...'}
+                  </span>
+                )}
+              </div>
+
+              {!isHeightAiMode && (
+                <p className="mt-1.5 text-[7px] font-bold text-white/65 uppercase tracking-wide">
+                  Tekan AI Tinggi ON untuk estimasi otomatis.
+                </p>
+              )}
+
+              {heightAiRange && (
+                <p className="mt-1.5 text-[7px] font-bold text-cyan-100/90 uppercase tracking-wide">
+                  Batas AI aktif: {heightAiRange.min}-{heightAiRange.max} cm.
+                </p>
+              )}
             </div>
 
           </div>
@@ -562,9 +1073,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
             </button>
 
             <div className="flex items-center justify-center">
-              {/* TOMBOL CAPTURE PUTIH BOLD (SOLID) */}
+      {/* TOMBOL CAPTURE PUTIH BOLD (SOLID) */}
               <button 
-                onClick={handleCaptureClick} 
+                onClick={e => {
+                  handleCaptureClick(e);
+                }}
                 disabled={cameraLoading || !!cameraError || needsUserAction}
                 className="group relative w-24 h-24 sm:w-28 sm:h-28 flex items-center justify-center active:scale-95 transition-all disabled:opacity-20"
               >
@@ -593,7 +1106,62 @@ export const CameraView: React.FC<CameraViewProps> = ({
         </div>
       </div>
 
+      {showHeightAiPopup && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center px-4 bg-black/45 backdrop-blur-[2px]">
+          <div className="w-full max-w-sm rounded-2xl border border-cyan-300/25 bg-slate-950/95 p-4 shadow-2xl">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <p className="text-[10px] font-black text-cyan-100 uppercase tracking-widest">Kalibrasi Tinggi AI</p>
+                <p className="mt-1 text-[9px] text-cyan-100/85 font-bold">
+                  Ambil 10 sampel manual. Sistem membentuk rentang min-max agar estimasi AI tidak terlalu rendah/tinggi.
+                </p>
+              </div>
+              <button
+                onClick={dismissHeightAiNotice}
+                className="w-6 h-6 rounded-full border border-cyan-200/35 text-cyan-100 text-[11px] font-black leading-none flex items-center justify-center"
+                aria-label="Tutup popup kalibrasi"
+                title="Tutup"
+              >
+                x
+              </button>
+            </div>
+
+            <div className="mt-3 rounded-xl bg-cyan-500/10 border border-cyan-300/20 p-2.5">
+              <p className="text-[9px] font-black text-cyan-100 uppercase tracking-widest">Progress Sampel</p>
+              <p className="mt-1 text-[9px] font-bold text-white/90">{Math.min(10, heightAiSamples.length)}/10 sampel</p>
+              <p className="mt-1 text-[8px] font-bold text-white/70">Nilai saat ini: {formState.tinggi} cm</p>
+              {heightAiRange && (
+                <p className="mt-1 text-[8px] font-bold text-cyan-100">Rentang aktif: {heightAiRange.min}-{heightAiRange.max} cm</p>
+              )}
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button
+                onClick={resetHeightAiCalibration}
+                className="px-3 py-2 rounded-xl bg-white/10 border border-white/20 text-white text-[9px] font-black uppercase tracking-widest active:scale-95"
+              >
+                Reset
+              </button>
+            </div>
+
+            <p className="mt-3 text-[8px] font-bold text-white/65">
+              Catatan: tinggi AI akan auto-update ke kolom tinggi di aplikasi, lalu ikut tersimpan saat foto di-capture.
+            </p>
+
+            <button
+              onClick={closeHeightAiPopup}
+              className="mt-3 w-full px-3 py-2 rounded-xl bg-emerald-600 text-white text-[9px] font-black uppercase tracking-widest active:scale-95"
+            >
+              Tutup
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_center,transparent_0%,rgba(0,0,0,0.5)_100%)]" />
+      
+      {/* Live Health Comment -muncul 1-2 detik saat analisis HCV diperbarui */}
+      <LiveHealthComment healthResult={livePlantHealth} duration={2000} />
     </div>
   );
 };
