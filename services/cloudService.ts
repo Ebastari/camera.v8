@@ -1,6 +1,6 @@
 import { PlantEntry, EcologyMetrics, CloudTree, CloudEcologyMetrics } from '../types';
 
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbym0oMDXPNNWn9lKcM7_uC97Dgsu9a8CgnxW849AOeg8wyio7BYU9FBy0gJEveovUaO8g/exec';
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbxcCr5mXPRBHmZ6NGdlwY9Y8IhEJbYxkaYvSfLskLPrJ2gv_pmL1ZhEJ31a0JO6gin12A/exec';
 
 
 class CloudService {

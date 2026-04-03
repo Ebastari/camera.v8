@@ -46,13 +46,38 @@ const dataUrlToFile = async (dataUrl: string, fileName: string): Promise<File> =
   return new File([blob], fileName, { type: blob.type || 'image/jpeg' });
 };
 
+const isLikelyValidImageDataUrl = (value: string): boolean => {
+  const clean = String(value || '').trim();
+  if (!/^data:image\/jpeg;base64,/i.test(clean) && !/^data:image\/jpg;base64,/i.test(clean)) {
+    return false;
+  }
+
+  const commaIndex = clean.indexOf(',');
+  if (commaIndex < 0) {
+    return false;
+  }
+
+  const rawBase64 = clean.slice(commaIndex + 1).replace(/\s+/g, '');
+  if (!rawBase64 || !/^[A-Za-z0-9+/]+=*$/.test(rawBase64)) {
+    return false;
+  }
+
+  try {
+    atob(rawBase64);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const GPS_ACCURACY_THRESHOLD_M = 20;
 const DESKTOP_GPS_ACCURACY_THRESHOLD_M = 60;
 const MAX_ACTIVE_ENTRIES = 60;
-const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbym0oMDXPNNWn9lKcM7_uC97Dgsu9a8CgnxW849AOeg8wyio7BYU9FBy0gJEveovUaO8g/exec';
+const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxcCr5mXPRBHmZ6NGdlwY9Y8IhEJbYxkaYvSfLskLPrJ2gv_pmL1ZhEJ31a0JO6gin12A/exec';
 const STORAGE_WARNING_RATIO = 0.75;
 const STORAGE_CRITICAL_RATIO = 0.9;
 const LEGACY_APPS_SCRIPT_URLS = [
+  'https://script.google.com/macros/s/AKfycbym0oMDXPNNWn9lKcM7_uC97Dgsu9a8CgnxW849AOeg8wyio7BYU9FBy0gJEveovUaO8g/exec',
   'https://script.google.com/macros/s/AKfycbyZ7Jx8rPkjEcJk7wM_OnIacacu_1MmXisTmLdoyR0UmEqULszsCmgccVaGd3JvSkgsLw/exec',
   'https://script.google.com/macros/s/AKfycbwwxuFkJCGh0FLY3-RpCbrCzltrXH5eVUIuK0qScj5f9DnkgdZwRFfC0mz1xBQMhBTmfQ/exec',
   'https://script.google.com/macros/s/AKfycbyOLIVrNrxyFIJHklKTUFEX-ckqPaORCo9ga6n7d_FGct5v01o5ZqD44bWj138zcTq49Q/exec',
@@ -756,6 +781,7 @@ const App: React.FC = () => {
     let unconfirmedCount = 0;
     let failedCount = 0;
     let driveWarningCount = 0;
+    let firstDriveWarningMessage = '';
     let lastErrorMessage = '';
     try {
       for (const entry of pending) {
@@ -780,6 +806,9 @@ const App: React.FC = () => {
             successCount++;
             if (result.warning) {
               driveWarningCount += 1;
+              if (!firstDriveWarningMessage) {
+                firstDriveWarningMessage = result.warning;
+              }
             }
           } else {
             const nextRetry = (entry.retryCount || 0) + 1;
@@ -813,7 +842,10 @@ const App: React.FC = () => {
           const prefix = successCount > 0 ? `${successCount} data terverifikasi.` : 'Belum ada data terverifikasi.';
           showToast(`${prefix} ${unconfirmedCount} data masih pending verifikasi.`, 'info');
         } else if (driveWarningCount > 0) {
-          showToast(`${successCount} data tersimpan ke cloud. ${driveWarningCount} foto belum berhasil masuk Drive.`, 'info');
+          const warningSuffix = driveWarningCount > 1
+            ? `${firstDriveWarningMessage} (${driveWarningCount} foto bermasalah)`
+            : firstDriveWarningMessage;
+          showToast(`${successCount} data tersimpan ke cloud. ${warningSuffix}`, 'info', 4200);
         } else {
           showToast(
             isBackground ? `Auto-sync berhasil untuk ${successCount} data.` : `${successCount} data berhasil diunggah`,
@@ -1001,8 +1033,12 @@ const App: React.FC = () => {
       
       // Injeksi data EXIF ke biner gambar
       const photoWithExif = await writeExifData(dataUrl, newEntryMeta);
-      
-      const finalEntry: PlantEntry = { ...newEntryMeta, foto: photoWithExif };
+      const finalPhoto = isLikelyValidImageDataUrl(photoWithExif) ? photoWithExif : dataUrl;
+      if (finalPhoto !== photoWithExif) {
+        console.warn('Hasil EXIF tidak valid, fallback ke foto asli sebelum upload.');
+      }
+
+      const finalEntry: PlantEntry = { ...newEntryMeta, foto: finalPhoto };
       const previewEntry: PlantEntry = {
         ...finalEntry,
         foto: finalEntry.thumbnail || finalEntry.foto,
@@ -1036,7 +1072,7 @@ const App: React.FC = () => {
       // iPhone/iPad: buka sheet Bagikan/Simpan agar kompatibel dengan policy Safari iOS.
       if (isIOSFamilyDevice() && typeof navigator.share === 'function') {
         try {
-          const imageFile = await dataUrlToFile(photoWithExif, fileName);
+          const imageFile = await dataUrlToFile(finalPhoto, fileName);
           const canShare =
             typeof navigator.canShare === 'function' && navigator.canShare({ files: [imageFile] });
 
@@ -1048,7 +1084,7 @@ const App: React.FC = () => {
             });
             showToast('Sheet Bagikan/Simpan dibuka.', 'success', 1500);
           } else {
-            const preview = window.open(photoWithExif, '_blank');
+            const preview = window.open(finalPhoto, '_blank');
             if (!preview) {
               showToast('Popup diblokir. Silakan izinkan popup untuk menyimpan foto.', 'error');
             } else {
@@ -1060,7 +1096,7 @@ const App: React.FC = () => {
           if (shareError instanceof DOMException && shareError.name === 'AbortError') {
             showToast('Bagikan dibatalkan pengguna.', 'info', 1500);
           } else {
-            const preview = window.open(photoWithExif, '_blank');
+            const preview = window.open(finalPhoto, '_blank');
             if (!preview) {
               showToast('Gagal membuka bagikan/simpan foto.', 'error');
             } else {
@@ -1071,7 +1107,7 @@ const App: React.FC = () => {
       } else {
         // Android/Desktop: tetap auto-download.
         const downloadLink = document.createElement('a');
-        downloadLink.href = photoWithExif;
+        downloadLink.href = finalPhoto;
         downloadLink.download = fileName;
         document.body.appendChild(downloadLink);
         downloadLink.click();

@@ -22,6 +22,48 @@ const isLikelyAppsScriptUrl = (url: string): boolean => {
 
 const normalizeUrl = (url: string): string => url.trim();
 
+const normalizeBase64 = (value: string): string => {
+  const trimmed = value.trim().replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
+  if (!trimmed) {
+    return '';
+  }
+
+  const remainder = trimmed.length % 4;
+  if (remainder === 0) {
+    return trimmed;
+  }
+
+  return `${trimmed}${'='.repeat(4 - remainder)}`;
+};
+
+const extractRawBase64 = (value: string): string => {
+  if (!value) {
+    return '';
+  }
+
+  const clean = value.trim();
+  const commaIndex = clean.indexOf(',');
+  const raw = commaIndex >= 0 ? clean.slice(commaIndex + 1) : clean;
+  return normalizeBase64(raw);
+};
+
+const isValidBase64Payload = (value: string): boolean => {
+  if (!value) {
+    return false;
+  }
+
+  if (!/^[A-Za-z0-9+/]+=*$/.test(value)) {
+    return false;
+  }
+
+  try {
+    atob(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const getUtf8ByteLength = (value: string): number => {
   try {
     return new TextEncoder().encode(value).length;
@@ -125,16 +167,23 @@ export const uploadToAppsScript = async (url: string, entry: PlantEntry): Promis
   // Teks path yang akan digunakan sebagai nama file di Drive dan referensi di Sheet
   const pathName = `Montana V2_Images/Gambar Montana (${entry.id}).jpg`;
   
-  const rawBase64 = (() => {
-    if (!entry.foto) {
-      return '';
-    }
-    if (!entry.foto.includes(',')) {
-      return entry.foto;
-    }
-    const parts = entry.foto.split(',');
-    return parts.length > 1 ? parts[1] : '';
-  })();
+  const rawBase64 = extractRawBase64(entry.foto || '');
+
+  if (entry.foto && !rawBase64) {
+    return {
+      ok: false,
+      confirmed: false,
+      message: 'Format foto tidak valid. Data URL gambar kosong atau rusak.',
+    };
+  }
+
+  if (rawBase64 && !isValidBase64Payload(rawBase64)) {
+    return {
+      ok: false,
+      confirmed: false,
+      message: 'Format Base64 foto tidak valid sebelum dikirim ke Apps Script.',
+    };
+  }
 
   /**
    * Payload diperkecil agar upload foto real tidak mudah melewati batas ukuran Apps Script.
@@ -230,8 +279,9 @@ export const uploadToAppsScript = async (url: string, entry: PlantEntry): Promis
       return verifyPersistedAfterCorsResponse(cleanUrl, entry.id);
     }
 
+    const driveWarningMessage = String(result?.driveMessage || '').trim();
     const driveWarning = rawBase64 && String(result?.url || '').trim() === ''
-      ? 'Data cloud tersimpan, tetapi foto belum berhasil dibuat di Google Drive.'
+      ? (driveWarningMessage || 'Data cloud tersimpan, tetapi foto belum berhasil dibuat di Google Drive.')
       : undefined;
 
     return {

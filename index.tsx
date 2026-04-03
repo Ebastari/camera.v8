@@ -16,7 +16,7 @@ root.render(
 );
 
 const isSecureContextForSW = window.location.protocol === 'https:' || window.location.hostname === 'localhost';
-const shouldRegisterServiceWorker = import.meta.env.DEV || import.meta.env.VITE_ENABLE_SW === 'true';
+const shouldRegisterServiceWorker = import.meta.env.PROD && import.meta.env.VITE_ENABLE_SW === 'true';
 const appCachePrefixes = ['montana-'];
 
 const clearLegacyAppCaches = async () => {
@@ -44,6 +44,11 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker
       .getRegistrations()
       .then(async (registrations) => {
+        await Promise.all(
+          registrations.map((registration) =>
+            registration.active?.postMessage({ type: 'CLEAR_CACHE' }),
+          ),
+        );
         await Promise.all(registrations.map((registration) => registration.unregister()));
         await clearLegacyAppCaches();
       })
