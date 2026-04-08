@@ -2181,21 +2181,35 @@ console.error('AI Height detection error:', err);
 
             <button
               type="button"
-              onClick={() => onSyncModeChange((prev) => (prev === 'fast' ? 'lite' : 'fast'))}
+              onClick={() => onSyncModeChange((prev) => {
+                if (prev === 'fast') return 'lite';
+                if (prev === 'lite') return 'offline';
+                // offline → redirect lalu kembali ke fast
+                window.open('https://cameraoffline.montana-tech.info/', '_blank');
+                return 'fast';
+              })}
               className={`backdrop-blur-sm px-2 py-1 rounded-lg border flex items-center gap-1.5 active:scale-95 transition-all ${
                 syncMode === 'fast'
                   ? 'bg-sky-500/10 border-sky-400/20'
-                  : 'bg-slate-500/10 border-slate-300/20'
+                  : syncMode === 'lite'
+                    ? 'bg-amber-500/10 border-amber-400/20'
+                    : 'bg-orange-500/10 border-orange-400/20'
               }`}
               title={
                 syncMode === 'fast'
-                  ? 'Mode Fast aktif: kirim otomatis saat koneksi tersedia'
-                  : 'Mode Lite aktif: kirim manual dari menu sync'
+                  ? 'Mode Fast: kirim otomatis saat koneksi tersedia'
+                  : syncMode === 'lite'
+                    ? 'Mode Lite: kirim manual dari menu sync'
+                    : 'Mode Offline: klik untuk buka versi offline'
               }
             >
-              <div className={`w-1.5 h-1.5 rounded-full ${syncMode === 'fast' ? 'bg-sky-300' : 'bg-slate-300'}`} />
-              <span className={`text-[7px] font-black uppercase tracking-widest ${syncMode === 'fast' ? 'text-sky-100' : 'text-slate-200'}`}>
-                Sync {syncMode}
+              <div className={`w-1.5 h-1.5 rounded-full ${
+                syncMode === 'fast' ? 'bg-sky-300' : syncMode === 'lite' ? 'bg-amber-300' : 'bg-orange-400 shadow-[0_0_4px_rgba(251,146,60,0.6)]'
+              }`} />
+              <span className={`text-[7px] font-black uppercase tracking-widest ${
+                syncMode === 'fast' ? 'text-sky-100' : syncMode === 'lite' ? 'text-amber-200' : 'text-orange-200'
+              }`}>
+                {syncMode === 'offline' ? 'Offline' : `Sync ${syncMode}`}
               </span>
             </button>
 

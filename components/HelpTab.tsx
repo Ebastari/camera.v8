@@ -58,9 +58,19 @@ const faqItems: HelpFaqItem[] = [
       'Bisa. Aplikasi menyimpan data lebih dulu di perangkat. Saat internet tersedia, data bisa disinkronkan ke cloud tanpa perlu input ulang.',
   },
   {
-    question: 'Apa beda tab Histori, HCV, Analitik, dan Cloud?',
+    question: 'Apa beda Mode Fast, Lite, dan Offline?',
     answer:
-      'Histori menampilkan daftar data pohon yang tersimpan. HCV menampilkan hasil kondisi per pohon lengkap dengan foto dan deskripsi. Analitik menampilkan ringkasan data lokal. Cloud menampilkan hasil sinkronisasi dan ringkasan data online.',
+      'Mode Fast mengirim data otomatis ke cloud saat koneksi tersedia. Mode Lite menyimpan data lokal dan mengirim manual lewat menu sync. Mode Offline adalah versi terpisah yang 100% tanpa internet — tidak ada cloud, tidak ada AI, hanya kamera + GPS + form manual + download spreadsheet. Cocok untuk lokasi tanpa sinyal sama sekali.',
+  },
+  {
+    question: 'Bagaimana cara mengakses Mode Offline?',
+    answer:
+      'Di panel kamera, klik tombol Sync sampai muncul label "Offline". Klik sekali lagi, maka browser akan membuka halaman Mode Offline di tab baru. Atau langsung buka cameraoffline.montana-tech.info dari browser.',
+  },
+  {
+    question: 'Apakah data dari Mode Offline bisa digabung ke versi utama?',
+    answer:
+      'Ya. Mode Offline menyimpan data dalam format spreadsheet dengan 46 kolom yang identik dengan versi utama. File CSV atau ZIP yang didownload dari Mode Offline bisa langsung diimpor ke sistem pelaporan yang sama.',
   },
   {
     question: 'Bagaimana jika jenis bibit saya belum ada?',
@@ -205,6 +215,93 @@ export const HelpTab: React.FC = () => {
               </div>
             );
           })}
+        </div>
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex items-center gap-2 px-1">
+          <div className="w-2 h-2 rounded-full bg-orange-500" />
+          <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Arsitektur 3 Mode</h4>
+        </div>
+        <div className="bg-white border border-slate-100 rounded-[2rem] p-5 shadow-sm space-y-5">
+          <p className="text-[13px] font-semibold text-slate-700 leading-relaxed">
+            Aplikasi ini memiliki tiga mode operasi yang bisa dipilih langsung dari tombol Sync di panel kamera.
+          </p>
+          <div className="space-y-3">
+            {[
+              {
+                mode: 'Fast',
+                color: 'bg-sky-500',
+                borderColor: 'border-sky-100',
+                bgColor: 'bg-sky-50',
+                textColor: 'text-sky-700',
+                desc: 'Kirim otomatis ke cloud saat koneksi tersedia. Cocok untuk area dengan sinyal stabil. Mendukung semua fitur: AI tinggi, HCV, analitik, sinkronisasi, dan dashboard cloud.',
+              },
+              {
+                mode: 'Lite',
+                color: 'bg-amber-500',
+                borderColor: 'border-amber-100',
+                bgColor: 'bg-amber-50',
+                textColor: 'text-amber-700',
+                desc: 'Simpan data lokal dulu, kirim manual nanti. Cocok untuk sinyal tidak stabil. Semua fitur tetap tersedia, hanya sinkronisasi dilakukan secara manual dari menu Sync.',
+              },
+              {
+                mode: 'Offline',
+                color: 'bg-orange-500',
+                borderColor: 'border-orange-100',
+                bgColor: 'bg-orange-50',
+                textColor: 'text-orange-700',
+                desc: 'Versi terpisah 100% tanpa internet. Tidak ada cloud, AI, atau sync. Hanya kamera + GPS + form manual + download foto + spreadsheet (CSV/ZIP). Super ringan (~73 KB). Cocok untuk lokasi tanpa sinyal sama sekali.',
+              },
+            ].map((item) => (
+              <div key={item.mode} className={`${item.bgColor} border ${item.borderColor} rounded-[1.75rem] px-5 py-4 flex gap-4 items-start`}>
+                <div className={`mt-1 w-3 h-3 rounded-full ${item.color} flex-shrink-0`} />
+                <div>
+                  <p className={`text-[12px] font-black ${item.textColor} uppercase tracking-[0.16em] mb-1`}>{item.mode}</p>
+                  <p className="text-[13px] font-semibold text-slate-700 leading-relaxed">{item.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="bg-slate-50 border border-slate-100 rounded-2xl p-4">
+            <p className="text-[11px] font-black text-slate-500 uppercase tracking-widest mb-2">Perbandingan</p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px] text-slate-600">
+                <thead>
+                  <tr className="border-b border-slate-200">
+                    <th className="text-left py-2 pr-3 font-black text-slate-800">Fitur</th>
+                    <th className="text-center py-2 px-2 font-black text-sky-600">Fast</th>
+                    <th className="text-center py-2 px-2 font-black text-amber-600">Lite</th>
+                    <th className="text-center py-2 px-2 font-black text-orange-600">Offline</th>
+                  </tr>
+                </thead>
+                <tbody className="font-semibold">
+                  {[
+                    ['Kamera + GPS + EXIF', '✓', '✓', '✓'],
+                    ['Form Manual', '✓', '✓', '✓'],
+                    ['Download Foto', '✓', '✓', '✓'],
+                    ['Export CSV/ZIP', '✓', '✓', '✓'],
+                    ['Spreadsheet 46 Kolom', '✓', '✓', '✓'],
+                    ['IndexedDB Lokal', '✓', '✓', '✓'],
+                    ['AI Tinggi Tanaman', '✓', '✓', '✗'],
+                    ['HCV & Analitik', '✓', '✓', '✗'],
+                    ['Sinkronisasi Cloud', 'Otomatis', 'Manual', '✗'],
+                    ['Dashboard Online', '✓', '✓', '✗'],
+                    ['Peta GIS', '✓', '✓', '✗'],
+                    ['Butuh Internet', 'Ya', 'Opsional', 'Tidak'],
+                    ['Ukuran Bundle', '~1.2 MB', '~1.2 MB', '~73 KB'],
+                  ].map(([fitur, fast, lite, offline]) => (
+                    <tr key={fitur} className="border-b border-slate-100 last:border-0">
+                      <td className="py-1.5 pr-3">{fitur}</td>
+                      <td className="text-center py-1.5">{fast}</td>
+                      <td className="text-center py-1.5">{lite}</td>
+                      <td className="text-center py-1.5">{offline}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </section>
 
