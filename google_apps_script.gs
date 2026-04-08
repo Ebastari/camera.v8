@@ -26,45 +26,46 @@ const DEFAULT_HEADERS = [
   'Pekerjaan',
   'Tinggi',
   'Koordinat',
-  'Koordinat_Asli',
-  'Koordinat_Revisi',
   'Y',
   'X',
   'Tanaman',
   'Tahun Tanam',
   'Pengawas',
   'Vendor',
-  'Tim',
   'Link Drive',
-  'Gambar',
-  'Gambar_Nama_File',
-  'FileID',
   'No Pohon',
   'Kesehatan',
+  'poop',
+  'Status_Duplikat',
+  'Eco_BiomassaKg',
+  'Eco_KarbonKgC',
+  'Koordinat_Asli',
+  'Koordinat_Revisi',
   'AI_Kesehatan',
   'AI_Confidence',
   'AI_Deskripsi',
   'HCV_Input',
+  'Eco_UpdatedAt',
+  'Path',
+  'Gambar',
+  'Tim',
+  'Gambar_Nama_File',
+  'FileID',
   'HCV_Deskripsi',
   'Description',
   'GPS_Quality',
   'GPS_Accuracy_M',
   'Status_Verifikasi',
-  'poop',
-  'Status_Duplikat',
-  'Eco_BiomassaKg',
-  'Eco_KarbonKgC',
   'Eco_JarakTerdekatM',
-  'Eco_SesuaiJarak',
   'Eco_KepadatanHa',
   'Eco_CCI',
-  'Eco_CCI_Grade',
-  'Eco_AreaHa',
   'Eco_JarakRata2M',
+  'Eco_AreaHa',
+  'Eco_SesuaiJarak',
+  'Eco_CCI_Grade',
   'Eco_JarakStdM',
   'Eco_KesesuaianJarakPct',
   'Eco_GpsMedianM',
-  'Eco_UpdatedAt',
 ];
 
 function doGet(e) {
@@ -497,6 +498,10 @@ function appendMonitoringRow_(sheet, payload) {
     noPohon = String(getNextTreeNumber_(sheet));
   }
 
+  const tinggiNum = toNumber_(tinggi);
+  const biomassaKg = estimateBiomassFromHeightCm_(tinggiNum);
+  const karbonKg = estimateCarbonFromBiomass_(biomassaKg);
+
   const row = new Array(headers.length).fill('');
   setByHeader_(row, headerIndex, 'ID', id);
   setByHeader_(row, headerIndex, 'Tanggal', tanggal);
@@ -512,9 +517,17 @@ function appendMonitoringRow_(sheet, payload) {
   setByHeader_(row, headerIndex, 'Tahun Tanam', tahunTanam);
   setByHeader_(row, headerIndex, 'Pengawas', pengawas);
   setByHeader_(row, headerIndex, 'Vendor', vendor);
-  setByHeader_(row, headerIndex, 'Tim', tim);
   setByHeader_(row, headerIndex, 'Link Drive', linkDrive);
+  setByHeader_(row, headerIndex, 'poop', poop);
+  setByHeader_(row, headerIndex, 'Status_Duplikat', statusDuplikat);
+  setByHeader_(row, headerIndex, 'Eco_BiomassaKg', biomassaKg);
+  setByHeader_(row, headerIndex, 'Eco_KarbonKgC', karbonKg);
+  setByHeader_(row, headerIndex, 'Koordinat_Asli', koordinatAsli);
+  setByHeader_(row, headerIndex, 'Koordinat_Revisi', koordinatRevisi);
+  setByHeader_(row, headerIndex, 'Eco_UpdatedAt', new Date().toISOString());
+  setByHeader_(row, headerIndex, 'Path', gambarPath);
   setByHeader_(row, headerIndex, 'Gambar', gambarPath);
+  setByHeader_(row, headerIndex, 'Tim', tim);
   setByHeader_(row, headerIndex, 'Gambar_Nama_File', gambarNamaFile);
   setByHeader_(row, headerIndex, 'FileID', fileId);
   setByHeader_(row, headerIndex, 'No Pohon', noPohon);
@@ -528,15 +541,6 @@ function appendMonitoringRow_(sheet, payload) {
   setByHeader_(row, headerIndex, 'GPS_Quality', gpsQuality);
   setByHeader_(row, headerIndex, 'GPS_Accuracy_M', gpsAccuracy);
   setByHeader_(row, headerIndex, 'Status_Verifikasi', statusVerifikasi);
-  setByHeader_(row, headerIndex, 'poop', poop);
-  setByHeader_(row, headerIndex, 'Status_Duplikat', statusDuplikat);
-
-  const tinggiNum = toNumber_(tinggi);
-  const biomassaKg = estimateBiomassFromHeightCm_(tinggiNum);
-  const karbonKg = estimateCarbonFromBiomass_(biomassaKg);
-  setByHeader_(row, headerIndex, 'Eco_BiomassaKg', biomassaKg);
-  setByHeader_(row, headerIndex, 'Eco_KarbonKgC', karbonKg);
-  setByHeader_(row, headerIndex, 'Eco_UpdatedAt', new Date().toISOString());
 
   if (existingRowNumber > 1) {
     sheet.getRange(existingRowNumber, 1, 1, headers.length).setValues([row]);
@@ -2188,7 +2192,9 @@ function extractRawBase64_(dataUrl) {
 }
 
 function buildImagePath_(payload, id, fallbackValue) {
-  const rawPath = String(payload.Gambar_Nama_File || payload.gambarNamaFile || fallbackValue || '').trim();
+  const rawPath = String(
+    payload.Path || payload.path || payload.Gambar || payload.gambar || payload.Gambar_Nama_File || payload.gambarNamaFile || fallbackValue || ''
+  ).trim();
   const normalized = rawPath.replace(/\\+/g, '/');
   const fileName = getFileNameFromPath_(normalized) || ('Montana_' + id + '.jpg');
   return FOLDER_NAME + '/' + fileName;

@@ -1078,7 +1078,7 @@ const App: React.FC = () => {
         showToast('Mode Lite aktif. Data disimpan lokal, kirim manual dari menu Sync.', 'info', 3200);
       }
 
-      const fileName = `TREE_${formState.jenis.toUpperCase()}_${id}.jpg`;
+      const fileName = `Gambar Montana (${id}).jpg`;
 
       // iPhone/iPad: buka sheet Bagikan/Simpan agar kompatibel dengan policy Safari iOS.
       if (isIOSFamilyDevice() && typeof navigator.share === 'function') {

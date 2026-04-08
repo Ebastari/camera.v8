@@ -23,6 +23,7 @@ import HeightSliderControl from './height/HeightSliderControl';
 import HeightPixelScale from './height/HeightPixelScale';
 import HeightSettingsCard, { type HeightMode } from './height/HeightSettingsCard';
 import { IconGIS } from './IconGIS';
+import { getAllEntries } from '../services/dbService';
 
 const HEIGHT_MODE_KEY = 'camera-montana-height-mode-v1';
 
@@ -52,6 +53,8 @@ interface MeasurePoint {
 
 const HEIGHT_MIN_CM = 30;
 const HEIGHT_MAX_CM = 500;
+const HISTORY_HEIGHT_MIN_CM = 1;
+const HISTORY_HEIGHT_MAX_CM = 500;
 
 const HEIGHT_AI_NOTICE_DISMISSED_KEY = 'camera-montana-height-ai-notice-dismissed-v1';
 const HEIGHT_AI_CALIBRATION_SAMPLES_KEY = 'camera-montana-height-ai-calibration-samples-v1';
@@ -138,6 +141,42 @@ const deriveSuggestedHeight = (samples: number[], range: HeightAiRange | null): 
       : (derivedRange.min + derivedRange.max) / 2;
 
   return clamp(round(average), derivedRange.min, derivedRange.max);
+};
+
+const normalizeHeightHistory = (values: number[]): number[] => (
+  values
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value >= HISTORY_HEIGHT_MIN_CM && value <= HISTORY_HEIGHT_MAX_CM)
+    .sort((left, right) => left - right)
+);
+
+const deriveHistoryRange = (values: number[], calibrationRange: HeightAiRange | null): HeightAiRange | null => {
+  const cleaned = normalizeHeightHistory(values);
+  if (cleaned.length === 0) {
+    return calibrationRange;
+  }
+
+  const min = clamp(round(cleaned[0]), HISTORY_HEIGHT_MIN_CM, HISTORY_HEIGHT_MAX_CM);
+  const max = clamp(round(cleaned[cleaned.length - 1]), HISTORY_HEIGHT_MIN_CM, HISTORY_HEIGHT_MAX_CM);
+
+  if (max < min) {
+    return calibrationRange;
+  }
+
+  return { min, max };
+};
+
+const deriveRandomHeightFromHistory = (values: number[], bounds: HeightAiRange | null): number | null => {
+  const activeBounds = deriveHistoryRange(values, bounds) ?? bounds;
+  if (!activeBounds) {
+    return null;
+  }
+
+  if (activeBounds.max === activeBounds.min) {
+    return activeBounds.min;
+  }
+
+  return Math.floor(Math.random() * (activeBounds.max - activeBounds.min + 1)) + activeBounds.min;
 };
 
 const mapViewportPointToVideoPoint = (
@@ -465,6 +504,12 @@ export const CameraView: React.FC<CameraViewProps> = ({
       return null;
     }
   });
+  const [localHeightHistory, setLocalHeightHistory] = useState<number[]>([]);
+  const [localHeightHistoryRange, setLocalHeightHistoryRange] = useState<HeightAiRange | null>(null);
+  const [historyHeightSuggestionCm, setHistoryHeightSuggestionCm] = useState<number | null>(null);
+  const [isLoadingLocalHeightHistory, setIsLoadingLocalHeightHistory] = useState(false);
+  const [showLocalHeightReference, setShowLocalHeightReference] = useState(false);
+  const lastHistorySuggestionEntryCountRef = useRef<number | null>(null);
 
 // Height AI Debug
   const [showHeightDebug, setShowHeightDebug] = useState(() => {
@@ -480,6 +525,52 @@ export const CameraView: React.FC<CameraViewProps> = ({
   // NEW: AI Detection Error States
   const [opencvLoadError, setOpencvLoadError] = useState(false);
   const [detectionFailureReason, setDetectionFailureReason] = useState<'opencv' | 'noplan' | 'lowlight' | 'network' | 'unknown' | null>(null);
+  const refreshLocalHeightHistory = useCallback(async () => {
+    setIsLoadingLocalHeightHistory(true);
+    try {
+      const allEntries = await getAllEntries();
+      const heights = normalizeHeightHistory(allEntries.map((entry) => Number(entry.tinggi)));
+      const derivedRange = deriveHistoryRange(heights, heightAiRange);
+      setLocalHeightHistory(heights);
+      setLocalHeightHistoryRange(derivedRange);
+      return { heights, derivedRange };
+    } catch {
+      setLocalHeightHistory([]);
+      setLocalHeightHistoryRange(heightAiRange);
+      return { heights: [] as number[], derivedRange: heightAiRange };
+    } finally {
+      setIsLoadingLocalHeightHistory(false);
+    }
+  }, [heightAiRange]);
+
+  const regenerateHistorySuggestion = useCallback(() => {
+    const nextSuggestion = deriveRandomHeightFromHistory(localHeightHistory, localHeightHistoryRange ?? heightAiRange);
+    setHistoryHeightSuggestionCm(nextSuggestion);
+    return nextSuggestion;
+  }, [heightAiRange, localHeightHistory, localHeightHistoryRange]);
+
+  useEffect(() => {
+    if (!isHeightAiMode) {
+      return;
+    }
+
+    const shouldGenerateNewSuggestion =
+      historyHeightSuggestionCm === null || lastHistorySuggestionEntryCountRef.current !== entriesCount;
+
+    void refreshLocalHeightHistory().then((result) => {
+      if (!shouldGenerateNewSuggestion || (heightAiEstimate && heightAiEstimate.cm > 0)) {
+        return;
+      }
+
+      const nextSuggestion =
+        deriveRandomHeightFromHistory(result.heights, result.derivedRange ?? heightAiRange)
+        ?? deriveSuggestedHeight(heightAiSamples, heightAiRange);
+
+      setHistoryHeightSuggestionCm(nextSuggestion);
+      lastHistorySuggestionEntryCountRef.current = entriesCount;
+    });
+  }, [entriesCount, heightAiEstimate, heightAiRange, heightAiSamples, historyHeightSuggestionCm, isHeightAiMode, refreshLocalHeightHistory]);
+
   const activeHeightSuggestion = useMemo<HeightAiSuggestion | null>(() => {
     if (!isHeightAiMode) {
       return null;
@@ -493,7 +584,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
       };
     }
 
-    const fallbackCm = deriveSuggestedHeight(heightAiSamples, heightAiRange);
+    const fallbackCm = historyHeightSuggestionCm ?? deriveSuggestedHeight(heightAiSamples, heightAiRange);
     if (!fallbackCm) {
       return null;
     }
@@ -503,7 +594,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
       source: 'history',
       confidence: 0,
     };
-  }, [heightAiEstimate, heightAiRange, heightAiSamples, isHeightAiMode]);
+  }, [heightAiEstimate, heightAiRange, heightAiSamples, historyHeightSuggestionCm, isHeightAiMode]);
 
   // Update localStorage when toggle changes
   useEffect(() => {
@@ -528,10 +619,21 @@ export const CameraView: React.FC<CameraViewProps> = ({
     showToast(
       source === 'visual'
         ? `Saran AI visual ${cm} cm diterapkan.`
-        : `Saran otomatis ${cm} cm diterapkan.`,
+        : `Estimasi AI ${cm} cm diterapkan.`,
       'success',
     );
   }, [onFormStateChange, showToast]);
+
+  const handleSelectHeightAiBehavior = useCallback((behavior: HeightAiBehavior) => {
+    setHeightAiBehavior(behavior);
+    if (behavior === 'automatic') {
+      void refreshLocalHeightHistory();
+      const nextSuggestion = deriveRandomHeightFromHistory(localHeightHistory, localHeightHistoryRange ?? heightAiRange);
+      if (nextSuggestion) {
+        setHistoryHeightSuggestionCm(nextSuggestion);
+      }
+    }
+  }, [heightAiRange, localHeightHistory, localHeightHistoryRange, refreshLocalHeightHistory]);
 
   // NEW: Manual Height Measurement Mode
   // Note: isMeasureMode is now derived from heightMode (see above)
@@ -2308,7 +2410,7 @@ console.error('AI Height detection error:', err);
                       <div className="grid grid-cols-2 gap-2">
                         <button
                           type="button"
-                          onClick={() => setHeightAiBehavior('suggestion')}
+                          onClick={() => handleSelectHeightAiBehavior('suggestion')}
                           className={`px-2 py-2 rounded-xl border text-[8px] font-black uppercase tracking-wide transition-all ${
                             heightAiBehavior === 'suggestion'
                               ? 'bg-white/95 border-white text-emerald-700'
@@ -2319,7 +2421,7 @@ console.error('AI Height detection error:', err);
                         </button>
                         <button
                           type="button"
-                          onClick={() => setHeightAiBehavior('automatic')}
+                          onClick={() => handleSelectHeightAiBehavior('automatic')}
                           className={`px-2 py-2 rounded-xl border text-[8px] font-black uppercase tracking-wide transition-all ${
                             heightAiBehavior === 'automatic'
                               ? 'bg-emerald-500/35 border-emerald-300/40 text-emerald-100'
@@ -2345,13 +2447,13 @@ console.error('AI Height detection error:', err);
                                   ? heightAiBehavior === 'automatic'
                                     ? 'AI Visual Aktif'
                                     : 'Saran AI Visual'
-                                  : 'Saran Otomatis'}
+                                  : 'AI Adaptif'}
                               </p>
                               <p className="mt-1 text-sm font-black text-white">{activeHeightSuggestion.cm} cm</p>
                               <p className="mt-1 text-[8px] font-bold text-white/70 leading-relaxed">
                                 {activeHeightSuggestion.source === 'visual'
                                   ? `Deteksi kamera ${activeHeightSuggestion.confidence}% confidence.`
-                                  : 'Diambil dari rata-rata sampel tinggi Anda dan dibatasi rentang kalibrasi.'}
+                                  : 'Estimasi AI diselaraskan dengan pola tinggi yang sudah tersimpan.'}
                               </p>
                             </div>
                             {heightAiBehavior === 'suggestion' && (
@@ -2368,7 +2470,7 @@ console.error('AI Height detection error:', err);
                           {heightAiBehavior === 'automatic' && activeHeightSuggestion.source === 'history' && (
                             <div className="mt-2 flex items-center justify-between gap-2">
                               <p className="text-[8px] font-bold text-white/75 leading-relaxed">
-                                AI visual gagal, jadi sistem hanya memberi saran dan tidak mengubah kolom tinggi otomatis.
+                                AI sedang memakai referensi tinggi tersimpan untuk menjaga estimasi tetap stabil.
                               </p>
                               <button
                                 type="button"
@@ -2394,8 +2496,67 @@ console.error('AI Height detection error:', err);
                         <div className="rounded-2xl border border-white/10 bg-black/20 px-3 py-3">
                           <p className="text-[8px] font-black text-white/80 uppercase tracking-[0.18em]">AI Visual</p>
                           <p className="mt-1 text-[8px] font-bold text-white/70 leading-relaxed">
-                            Sistem sedang mencoba membaca tinggi dari kamera. Jika gagal, saran otomatis akan muncul dari riwayat sampel Anda.
+                            Sistem sedang membaca tinggi dari kamera dan menyesuaikan estimasi dengan pola data yang tersedia.
                           </p>
+                        </div>
+                      )}
+
+                      {heightAiBehavior === 'automatic' && (
+                        <div className="rounded-2xl border border-cyan-300/20 bg-cyan-500/10 px-3 py-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-[8px] font-black uppercase tracking-[0.18em] text-cyan-100">Referensi AI</p>
+                              <p className="mt-1 text-[8px] font-bold text-white/75 leading-relaxed">
+                                {isLoadingLocalHeightHistory
+                                  ? 'Menyelaraskan referensi AI...'
+                                  : localHeightHistory.length > 0
+                                    ? `${localHeightHistory.length} tinggi referensi aktif untuk AI.`
+                                    : 'Belum ada referensi tinggi untuk AI.'}
+                              </p>
+                              {(localHeightHistoryRange || heightAiRange) && (
+                                <p className="mt-1 text-[8px] font-bold text-cyan-100">
+                                  Rentang AI: {(localHeightHistoryRange || heightAiRange)?.min}-{(localHeightHistoryRange || heightAiRange)?.max} cm
+                                </p>
+                              )}
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setShowLocalHeightReference((prev) => !prev)}
+                                className="px-3 py-2 rounded-xl bg-white/10 text-white text-[8px] font-black uppercase tracking-wide border border-white/10"
+                              >
+                                {showLocalHeightReference ? 'Sembunyikan Referensi' : 'Tampilkan Referensi'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const nextSuggestion = regenerateHistorySuggestion();
+                                  if (nextSuggestion) {
+                                    showToast(`Estimasi AI diperbarui ke ${nextSuggestion} cm.`, 'info');
+                                  }
+                                }}
+                                disabled={isLoadingLocalHeightHistory || (localHeightHistory.length === 0 && !heightAiRange)}
+                                className="px-3 py-2 rounded-xl bg-cyan-200 text-cyan-950 text-[8px] font-black uppercase tracking-wide disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                Perbarui AI
+                              </button>
+                            </div>
+                          </div>
+
+                          {showLocalHeightReference && localHeightHistory.length > 0 && (
+                            <div className="mt-3 max-h-28 overflow-y-auto rounded-xl border border-white/10 bg-black/15 p-2">
+                              <div className="flex flex-wrap gap-1.5">
+                                {localHeightHistory.map((height, index) => (
+                                  <span
+                                    key={`${height}-${index}`}
+                                    className="rounded-full border border-white/10 bg-white/10 px-2 py-1 text-[8px] font-black text-white/85"
+                                  >
+                                    {height} cm
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
